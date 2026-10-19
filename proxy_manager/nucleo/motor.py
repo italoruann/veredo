@@ -1,0 +1,612 @@
+"""Motor do proxy: abre as portas locais (SOCKS5, HTTP, PAC e transparente), aplica as regras
+a cada conexão e repassa os bytes entre o aplicativo e o destino."""
+from __future__ import annotations
+
+import asyncio
+import ipaddress
+import platform
+import threading
+import time
+from typing import Callable, Optional, Protocol
+
+from . import processos, proxy_http, socks5, verificacao_ip
+from .configuracao import Configuracao, PerfilProxy
+from .integracao_sistema import gerar_script_pac, iniciar_servidor_pac
+from .registro import EntradaLog, Registro
+from .regras import ConjuntoRegras, Resultado
+from .transparente import inspecao
+
+CallbackEstado = Callable[[bool, str], None]
+# id do perfil, IP anterior ("" na primeira verificação), IP atual
+CallbackIpSaida = Callable[[str, str, str], None]
+
+# O ip-api.com limita requisições por minuto; o IP de saída é reconsultado no máximo a cada 10 min.
+VALIDADE_CACHE_IP_SAIDA = 600.0
+
+
+class BackendTransparente(Protocol):
+    def iniciar(self) -> tuple[bool, str]: ...
+    def parar(self) -> tuple[bool, str]: ...
+    def resolver_destino(self, escritor: asyncio.StreamWriter, porta_origem: int) -> Optional[tuple[str, int]]: ...
+
+
+def _criar_backend_transparente(porta: int) -> Optional[BackendTransparente]:
+    sistema = platform.system()
+    if sistema == "Linux":
+        from .transparente.linux_nftables import ModoTransparenteLinux
+        return ModoTransparenteLinux(porta)
+    if sistema == "Windows":
+        from .transparente.windows_windivert import ModoTransparenteWindows
+        return ModoTransparenteWindows(porta)
+    return None
+
+
+def _ip_literal(host: str) -> Optional[str]:
+    try:
+        ipaddress.ip_address(host)
+        return host
+    except ValueError:
+        return None
+
+
+async def _fechar_servidor(servidor: Optional[asyncio.AbstractServer]) -> None:
+    if servidor is not None:
+        servidor.close()
+        await asyncio.wait_for(servidor.wait_closed(), timeout=3)
+
+
+class MotorProxy:
+    def __init__(self, configuracao: Configuracao, registro: Registro):
+        self.configuracao = configuracao
+        self.registro = registro
+        self.conjunto_regras = ConjuntoRegras.interpretar(configuracao.texto_regras)
+        self.ao_mudar_estado: Optional[CallbackEstado] = None
+        self.ao_mudar_ip_saida: Optional[CallbackIpSaida] = None
+
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._thread: Optional[threading.Thread] = None
+        self._pronto = threading.Event()
+        self._servidor_socks: Optional[asyncio.AbstractServer] = None
+        self._servidor_http: Optional[asyncio.AbstractServer] = None
+        self._servidor_pac: Optional[asyncio.AbstractServer] = None
+        self._servidor_transparente: Optional[asyncio.AbstractServer] = None
+        self.backend_transparente: Optional[BackendTransparente] = None
+        self._escritores_ativos: set[asyncio.StreamWriter] = set()
+        self._tarefas_fundo: set[asyncio.Task] = set()
+
+        # A chave do cache inclui host/porta/tipo para que editar o perfil invalide o valor.
+        self._cache_ip_saida: dict[str, tuple[float, str]] = {}
+        self._ip_saida_em_verificacao: set[str] = set()
+        # Último IP conhecido de cada perfil, para avisar quando ele muda.
+        self._ip_saida_por_perfil: dict[str, str] = {}
+
+        self.conexoes_ativas = 0
+        self.total_enviado = 0
+        self.total_recebido = 0
+        self.proxy_enviado = 0
+        self.proxy_recebido = 0
+        self.direto_enviado = 0
+        self.direto_recebido = 0
+
+    # -- ciclo de vida -------------------------------------------------------------
+
+    def em_execucao(self) -> bool:
+        return bool(self._thread and self._thread.is_alive())
+
+    def atualizar_configuracao(self, configuracao: Configuracao) -> None:
+        self.configuracao = configuracao
+        self.conjunto_regras = ConjuntoRegras.interpretar(configuracao.texto_regras)
+
+    def iniciar(self) -> None:
+        if self.em_execucao():
+            return
+        self._pronto.clear()
+        self._thread = threading.Thread(target=self._executar_loop, name="motor-proxy", daemon=True)
+        self._thread.start()
+        self._pronto.wait(timeout=5)
+
+    def parar(self) -> None:
+        loop = self._loop
+        thread = self._thread
+        if loop and loop.is_running():
+            futuro = asyncio.run_coroutine_threadsafe(self._encerrar(), loop)
+            try:
+                futuro.result(timeout=10)
+            except Exception:
+                pass
+            # O loop só pode parar depois que _encerrar() terminou; parar de dentro da própria
+            # corrotina impedia o futuro de ser resolvido e travava esta chamada.
+            loop.call_soon_threadsafe(loop.stop)
+        if thread:
+            thread.join(timeout=10)
+            if thread.is_alive():
+                return
+        self._thread = None
+        self._loop = None
+
+    def _executar_loop(self) -> None:
+        loop = asyncio.new_event_loop()
+        self._loop = loop
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(self._iniciar_servidores())
+            self._pronto.set()
+            loop.run_forever()
+        except Exception as exc:
+            self._pronto.set()
+            self._emitir_estado(False, f"Falha ao iniciar o motor: {exc}")
+        finally:
+            loop.close()
+
+    async def _iniciar_servidores(self) -> None:
+        prefs = self.configuracao.preferencias
+        try:
+            self._servidor_socks = await asyncio.start_server(self._atender_socks, "127.0.0.1", prefs.porta_socks)
+            self._servidor_http = await asyncio.start_server(self._atender_http, "127.0.0.1", prefs.porta_http)
+            self._servidor_pac = await iniciar_servidor_pac(self._texto_pac, prefs.porta_pac)
+        except OSError as exc:
+            self._emitir_estado(False, f"Não foi possível abrir as portas locais: {exc}")
+            raise
+
+        if prefs.modo_transparente_ativo:
+            backend = _criar_backend_transparente(prefs.porta_transparente)
+            if backend is None:
+                self._emitir_estado(False, "Modo transparente não é suportado nesta plataforma.")
+                raise RuntimeError("modo transparente não suportado nesta plataforma")
+            ok, mensagem = backend.iniciar()
+            if not ok:
+                self._emitir_estado(False, f"Falha ao ativar o modo transparente: {mensagem}")
+                raise RuntimeError(mensagem)
+            self._servidor_transparente = await asyncio.start_server(
+                self._atender_transparente, "127.0.0.1", prefs.porta_transparente)
+            self.backend_transparente = backend
+
+        self._emitir_estado(True, "Motor iniciado")
+
+    def _texto_pac(self) -> str:
+        prefs = self.configuracao.preferencias
+        return gerar_script_pac(prefs.porta_socks, prefs.porta_http)
+
+    async def _encerrar(self) -> None:
+        servidores = [s for s in (self._servidor_socks, self._servidor_http, self._servidor_pac,
+                                  self._servidor_transparente) if s is not None]
+        for servidor in servidores:
+            servidor.close()
+
+        # Túneis longos (HTTPS aberto pelo navegador) são abortados; sem isso wait_closed()
+        # ficaria esperando indefinidamente.
+        for escritor in list(self._escritores_ativos):
+            try:
+                escritor.transport.abort()
+            except Exception:
+                pass
+        self._escritores_ativos.clear()
+
+        pendentes = list(self._tarefas_fundo)
+        for tarefa in pendentes:
+            tarefa.cancel()
+        if pendentes:
+            await asyncio.gather(*pendentes, return_exceptions=True)
+
+        for servidor in servidores:
+            try:
+                await asyncio.wait_for(servidor.wait_closed(), timeout=3)
+            except Exception:
+                pass
+        self._servidor_socks = self._servidor_http = self._servidor_pac = self._servidor_transparente = None
+
+        if self.backend_transparente is not None:
+            await asyncio.to_thread(self.backend_transparente.parar)
+            self.backend_transparente = None
+
+        self._emitir_estado(False, "Motor parado")
+
+    # -- mudanças de porta com o motor ligado -----------------------------------------
+
+    def aplicar_ao_vivo(self, nova_configuracao: Configuracao) -> tuple[bool, str]:
+        """Reabre apenas as portas que mudaram, sem derrubar as conexões em andamento.
+
+        Itens que não puderem ser aplicados voltam ao valor anterior em `nova_configuracao`.
+        Com o motor parado basta `atualizar_configuracao()`."""
+        loop = self._loop
+        if not self.em_execucao() or loop is None or not loop.is_running():
+            return False, "O motor não está em execução."
+        futuro = asyncio.run_coroutine_threadsafe(self._aplicar_ao_vivo(nova_configuracao), loop)
+        try:
+            return futuro.result(timeout=10)
+        except Exception as exc:
+            return False, f"Falha ao aplicar configurações: {exc}"
+
+    async def _aplicar_ao_vivo(self, nova_configuracao: Configuracao) -> tuple[bool, str]:
+        antigas = self.configuracao.preferencias
+        novas = nova_configuracao.preferencias
+        aplicados: list[str] = []
+        erros: list[str] = []
+
+        if novas.porta_socks != antigas.porta_socks:
+            try:
+                self._servidor_socks = await self._trocar_servidor(
+                    self._servidor_socks, self._atender_socks, novas.porta_socks)
+                aplicados.append(f"SOCKS5 → porta {novas.porta_socks}")
+            except OSError as exc:
+                erros.append(f"porta SOCKS5 ({novas.porta_socks}): {exc}")
+                novas.porta_socks = antigas.porta_socks
+
+        if novas.porta_http != antigas.porta_http:
+            try:
+                self._servidor_http = await self._trocar_servidor(
+                    self._servidor_http, self._atender_http, novas.porta_http)
+                aplicados.append(f"HTTP → porta {novas.porta_http}")
+            except OSError as exc:
+                erros.append(f"porta HTTP ({novas.porta_http}): {exc}")
+                novas.porta_http = antigas.porta_http
+
+        if novas.porta_pac != antigas.porta_pac:
+            try:
+                novo = await iniciar_servidor_pac(self._texto_pac, novas.porta_pac)
+                await _fechar_servidor(self._servidor_pac)
+                self._servidor_pac = novo
+                aplicados.append(f"PAC → porta {novas.porta_pac}")
+            except OSError as exc:
+                erros.append(f"porta do PAC ({novas.porta_pac}): {exc}")
+                novas.porta_pac = antigas.porta_pac
+
+        transparente_mudou = (
+            novas.modo_transparente_ativo != antigas.modo_transparente_ativo
+            or (novas.modo_transparente_ativo and novas.porta_transparente != antigas.porta_transparente)
+        )
+        if transparente_mudou:
+            try:
+                await self._aplicar_modo_transparente(novas)
+                aplicados.append("modo transparente")
+            except (OSError, RuntimeError) as exc:
+                erros.append(f"modo transparente: {exc}")
+                novas.modo_transparente_ativo = antigas.modo_transparente_ativo
+                novas.porta_transparente = antigas.porta_transparente
+
+        self.configuracao = nova_configuracao
+        self.conjunto_regras = ConjuntoRegras.interpretar(nova_configuracao.texto_regras)
+
+        if aplicados:
+            # Também faz o contexto reaplicar o PAC no sistema, caso a porta dele tenha mudado.
+            self._emitir_estado(True, "Configurações aplicadas sem parar o motor: " + ", ".join(aplicados) + ".")
+        if erros:
+            return False, "Alguns itens não puderam ser aplicados (mantidos como estavam): " + "; ".join(erros)
+        if not aplicados:
+            return True, "Nada mudou nas portas/modo transparente."
+        return True, "Aplicado sem parar o motor: " + ", ".join(aplicados) + "."
+
+    @staticmethod
+    async def _trocar_servidor(antigo: Optional[asyncio.AbstractServer], tratador,
+                               porta: int) -> asyncio.AbstractServer:
+        # Abre a porta nova antes de fechar a antiga: se falhar, a antiga continua funcionando.
+        novo = await asyncio.start_server(tratador, "127.0.0.1", porta)
+        await _fechar_servidor(antigo)
+        return novo
+
+    async def _aplicar_modo_transparente(self, prefs) -> None:
+        backend_antigo = self.backend_transparente
+        servidor_antigo = self._servidor_transparente
+
+        if not prefs.modo_transparente_ativo:
+            await _fechar_servidor(servidor_antigo)
+            self._servidor_transparente = None
+            if backend_antigo is not None:
+                await asyncio.to_thread(backend_antigo.parar)
+                self.backend_transparente = None
+            return
+
+        backend = _criar_backend_transparente(prefs.porta_transparente)
+        if backend is None:
+            raise RuntimeError("modo transparente não é suportado nesta plataforma")
+        ok, mensagem = await asyncio.to_thread(backend.iniciar)
+        if not ok:
+            raise RuntimeError(mensagem)
+        servidor_novo = await asyncio.start_server(
+            self._atender_transparente, "127.0.0.1", prefs.porta_transparente)
+
+        await _fechar_servidor(servidor_antigo)
+        if backend_antigo is not None:
+            await asyncio.to_thread(backend_antigo.parar)
+        self._servidor_transparente = servidor_novo
+        self.backend_transparente = backend
+
+    def _emitir_estado(self, ativo: bool, mensagem: str) -> None:
+        if self.ao_mudar_estado:
+            self.ao_mudar_estado(ativo, mensagem)
+
+    # -- decisão de roteamento ------------------------------------------------------
+
+    def _resolver_perfil(self, resultado: Resultado) -> Optional[PerfilProxy]:
+        if resultado.nome_proxy:
+            return self.configuracao.buscar_proxy(resultado.nome_proxy)
+        return self.configuracao.proxy_padrao()
+
+    @staticmethod
+    def _rotulo_regra(resultado: Resultado) -> str:
+        regra = resultado.regra
+        if regra is None:
+            return "(padrão)"
+        return regra.alvo if regra.acao == "proxy" else f"{regra.alvo} +{regra.acao}"
+
+    async def _preparar(self, host_destino: str, porta_destino: int, ip_origem: str, porta_origem: int,
+                        porta_escuta: int, protocolo: str, host_regras: Optional[str] = None,
+                        destino_original: Optional[tuple[str, int]] = None,
+                        ) -> tuple[Resultado, Optional[PerfilProxy], EntradaLog]:
+        """Identifica o processo, avalia as regras e registra a conexão.
+
+        No modo transparente `host_destino` é sempre o IP original; `host_regras` traz o domínio
+        descoberto pelo SNI/Host, e `destino_original` ajuda a achar o processo dono do socket."""
+        proc = await asyncio.to_thread(processos.processo_da_conexao, ip_origem, porta_origem,
+                                       porta_escuta, destino_original)
+        ip_literal = _ip_literal(host_destino)
+        host_para_regras = host_regras or host_destino
+        resultado = self.conjunto_regras.avaliar(proc.nome, proc.caminho, host_para_regras, ip_literal,
+                                                 acao_padrao=self.configuracao.preferencias.acao_padrao)
+        perfil: Optional[PerfilProxy] = None
+        rotulo_proxy = ""
+        ip_proxy = ""
+        verificar_ip_saida = False
+        if resultado.tipo_acao == "proxy":
+            perfil = self._resolver_perfil(resultado)
+            rotulo_proxy = perfil.nome if perfil else "(nenhum proxy configurado)"
+            if perfil:
+                em_cache = self._cache_ip_saida.get(self._chave_cache_ip(perfil))
+                if em_cache:
+                    ip_proxy = em_cache[1]
+                    verificar_ip_saida = time.time() - em_cache[0] >= VALIDADE_CACHE_IP_SAIDA
+                else:
+                    verificar_ip_saida = True
+
+        entrada = self.registro.adicionar(EntradaLog(
+            pid=proc.pid, nome_processo=proc.nome, caminho_processo=proc.caminho, protocolo=protocolo,
+            host_destino=host_para_regras, ip_destino=ip_literal or "", porta_destino=porta_destino,
+            regra_aplicada=self._rotulo_regra(resultado), acao=resultado.tipo_acao,
+            proxy_usado=rotulo_proxy, ip_proxy=ip_proxy,
+        ))
+        if ip_literal is None:
+            self._em_segundo_plano(self._resolver_ip_destino(entrada.id, host_destino))
+        if perfil is not None and verificar_ip_saida:
+            self._em_segundo_plano(self._atualizar_ip_saida(perfil, entrada.id, tinha_valor=bool(ip_proxy)))
+        return resultado, perfil, entrada
+
+    def _em_segundo_plano(self, corrotina) -> None:
+        tarefa = asyncio.ensure_future(corrotina)
+        self._tarefas_fundo.add(tarefa)
+        tarefa.add_done_callback(self._tarefas_fundo.discard)
+
+    def restaurar_ips_saida(self, ip_atual_por_perfil: dict[str, str]) -> None:
+        """Recebe os IPs de saída da sessão anterior para detectar mudanças desde então."""
+        self._ip_saida_por_perfil.update(ip_atual_por_perfil)
+
+    @staticmethod
+    def _chave_cache_ip(perfil: PerfilProxy) -> str:
+        return f"{perfil.id}:{perfil.type}:{perfil.host}:{perfil.port}"
+
+    async def _resolver_ip_destino(self, id_entrada: str, host: str) -> None:
+        try:
+            infos = await asyncio.wait_for(asyncio.get_running_loop().getaddrinfo(host, None), timeout=2.0)
+        except Exception:
+            return
+        if infos:
+            self.registro.atualizar(id_entrada, ip_destino=infos[0][4][0])
+
+    async def _atualizar_ip_saida(self, perfil: PerfilProxy, id_entrada: str, tinha_valor: bool) -> None:
+        chave = self._chave_cache_ip(perfil)
+        if chave in self._ip_saida_em_verificacao:
+            return
+        self._ip_saida_em_verificacao.add(chave)
+        try:
+            ip = await verificacao_ip.consultar_ip_saida(perfil)
+        finally:
+            self._ip_saida_em_verificacao.discard(chave)
+
+        if ip:
+            self._cache_ip_saida[chave] = (time.time(), ip)
+            self.registro.atualizar(id_entrada, ip_proxy=ip)
+            anterior = self._ip_saida_por_perfil.get(perfil.id, "")
+            if ip != anterior:
+                self._ip_saida_por_perfil[perfil.id] = ip
+                if self.ao_mudar_ip_saida:
+                    self.ao_mudar_ip_saida(perfil.id, anterior, ip)
+        elif not tinha_valor:
+            # "?" indica que a verificação falhou; um valor antigo em cache é mantido.
+            self.registro.atualizar(id_entrada, ip_proxy="?")
+
+    async def _conectar_destino(self, resultado: Resultado, perfil: Optional[PerfilProxy],
+                                host: str, porta: int):
+        if resultado.tipo_acao == "direct":
+            return await asyncio.open_connection(host, porta)
+        if perfil is None:
+            raise RuntimeError("nenhum perfil de proxy disponível para esta regra")
+        conectar = socks5.conectar_via_socks5 if perfil.type == "socks5" else proxy_http.conectar_via_http
+        return await conectar(perfil.host, perfil.port, host, porta, perfil.usuario, perfil.senha)
+
+    # -- atendimento das conexões ----------------------------------------------------
+
+    async def _atender_socks(self, leitor: asyncio.StreamReader, escritor: asyncio.StreamWriter) -> None:
+        inicio = time.monotonic()
+        origem = escritor.get_extra_info("peername") or ("", 0)
+        try:
+            pedido = await socks5.negociar_servidor(leitor, escritor)
+        except Exception:
+            escritor.close()
+            return
+
+        resultado, perfil, entrada = await self._preparar(
+            pedido.host, pedido.port, origem[0], origem[1], self.configuracao.preferencias.porta_socks, "socks5")
+
+        if resultado.tipo_acao == "block":
+            await socks5.responder_cliente(escritor, socks5.REP_NOT_ALLOWED)
+            escritor.close()
+            self._finalizar(entrada, inicio, estado="bloqueada")
+            return
+
+        try:
+            leitor_destino, escritor_destino = await self._conectar_destino(resultado, perfil, pedido.host, pedido.port)
+        except Exception as exc:
+            await socks5.responder_cliente(escritor, socks5.REP_HOST_UNREACHABLE)
+            escritor.close()
+            self._finalizar(entrada, inicio, estado="erro", erro=str(exc))
+            return
+
+        await socks5.responder_cliente(escritor, socks5.REP_SUCCESS)
+        await self._tunelar(leitor, escritor, leitor_destino, escritor_destino, resultado, entrada, inicio)
+
+    async def _atender_http(self, leitor: asyncio.StreamReader, escritor: asyncio.StreamWriter) -> None:
+        inicio = time.monotonic()
+        origem = escritor.get_extra_info("peername") or ("", 0)
+        try:
+            cabecalho = await proxy_http.ler_cabecalho_requisicao(leitor)
+            host, porta = proxy_http.extrair_destino(cabecalho)
+        except Exception:
+            escritor.close()
+            return
+
+        resultado, perfil, entrada = await self._preparar(
+            host, porta, origem[0], origem[1], self.configuracao.preferencias.porta_http, "http")
+        eh_connect = cabecalho.metodo == "CONNECT"
+
+        if resultado.tipo_acao == "block":
+            await self._erro_http(escritor, 403, "Forbidden")
+            self._finalizar(entrada, inicio, estado="bloqueada")
+            return
+
+        via_proxy_http = resultado.tipo_acao == "proxy" and perfil is not None and perfil.type == "http"
+        try:
+            leitor_destino, escritor_destino = await self._conectar_destino(resultado, perfil, host, porta)
+            if not eh_connect:
+                if via_proxy_http:
+                    auth = proxy_http.auth_basica(perfil.usuario, perfil.senha) if perfil.usuario else None
+                    escritor_destino.write(proxy_http.requisicao_forma_absoluta(cabecalho, auth))
+                else:
+                    escritor_destino.write(proxy_http.requisicao_forma_origem(cabecalho))
+                await escritor_destino.drain()
+        except Exception as exc:
+            await self._erro_http(escritor, 502, "Bad Gateway")
+            self._finalizar(entrada, inicio, estado="erro", erro=str(exc))
+            return
+
+        if eh_connect:
+            escritor.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+            await escritor.drain()
+        await self._tunelar(leitor, escritor, leitor_destino, escritor_destino, resultado, entrada, inicio)
+
+    async def _atender_transparente(self, leitor: asyncio.StreamReader, escritor: asyncio.StreamWriter) -> None:
+        inicio = time.monotonic()
+        origem = escritor.get_extra_info("peername") or ("", 0)
+        backend = self.backend_transparente
+        destino = backend.resolver_destino(escritor, origem[1]) if backend else None
+        if destino is None:
+            # Conexão que não veio do redirecionamento: não há para onde encaminhar.
+            escritor.close()
+            return
+        host, porta = destino
+
+        # Lê os primeiros bytes para descobrir o domínio (SNI ou Host); eles são repassados intactos.
+        prefixo = b""
+        if porta in (80, 443):
+            try:
+                prefixo = await asyncio.wait_for(leitor.read(4096), timeout=0.3)
+            except (asyncio.TimeoutError, OSError):
+                prefixo = b""
+        host_detectado = None
+        if prefixo and porta == 443:
+            host_detectado = inspecao.extrair_sni(prefixo)
+        elif prefixo and porta == 80:
+            host_detectado = inspecao.extrair_host_http(prefixo)
+
+        resultado, perfil, entrada = await self._preparar(
+            host, porta, origem[0], origem[1], self.configuracao.preferencias.porta_transparente,
+            "transparente", host_regras=host_detectado, destino_original=destino)
+
+        if resultado.tipo_acao == "block":
+            escritor.close()
+            self._finalizar(entrada, inicio, estado="bloqueada")
+            return
+
+        try:
+            # Conecta ao IP original para não depender de uma nova resolução de DNS.
+            leitor_destino, escritor_destino = await self._conectar_destino(resultado, perfil, host, porta)
+            if prefixo:
+                escritor_destino.write(prefixo)
+                await escritor_destino.drain()
+        except Exception as exc:
+            escritor.close()
+            self._finalizar(entrada, inicio, estado="erro", erro=str(exc))
+            return
+
+        if prefixo:
+            self._contar(len(prefixo), enviado=True, via_proxy=resultado.tipo_acao == "proxy")
+        await self._tunelar(leitor, escritor, leitor_destino, escritor_destino, resultado, entrada, inicio,
+                            ja_enviados=len(prefixo))
+
+    # -- utilidades -------------------------------------------------------------------
+
+    def _finalizar(self, entrada: EntradaLog, inicio: float, **mudancas) -> None:
+        duracao = int((time.monotonic() - inicio) * 1000)
+        self.registro.atualizar(entrada.id, duracao_ms=duracao, **mudancas)
+
+    @staticmethod
+    async def _erro_http(escritor: asyncio.StreamWriter, codigo: int, motivo: str) -> None:
+        resposta = f"HTTP/1.1 {codigo} {motivo}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        try:
+            escritor.write(resposta.encode("ascii"))
+            await escritor.drain()
+        finally:
+            escritor.close()
+
+    def _contar(self, n: int, enviado: bool, via_proxy: bool) -> None:
+        if enviado:
+            self.total_enviado += n
+            if via_proxy:
+                self.proxy_enviado += n
+            else:
+                self.direto_enviado += n
+        else:
+            self.total_recebido += n
+            if via_proxy:
+                self.proxy_recebido += n
+            else:
+                self.direto_recebido += n
+
+    async def _tunelar(self, leitor: asyncio.StreamReader, escritor: asyncio.StreamWriter,
+                       leitor_destino: asyncio.StreamReader, escritor_destino: asyncio.StreamWriter,
+                       resultado: Resultado, entrada: EntradaLog, inicio: float, ja_enviados: int = 0) -> None:
+        self.conexoes_ativas += 1
+        self._escritores_ativos.update((escritor, escritor_destino))
+        try:
+            enviados, recebidos = await self._encaminhar(
+                leitor, escritor, leitor_destino, escritor_destino, via_proxy=resultado.tipo_acao == "proxy")
+        finally:
+            self.conexoes_ativas -= 1
+            self._escritores_ativos.discard(escritor)
+            self._escritores_ativos.discard(escritor_destino)
+        self._finalizar(entrada, inicio, estado="concluida", bytes_enviados=enviados + ja_enviados,
+                        bytes_recebidos=recebidos)
+
+    async def _encaminhar(self, leitor_cliente: asyncio.StreamReader, escritor_cliente: asyncio.StreamWriter,
+                          leitor_destino: asyncio.StreamReader, escritor_destino: asyncio.StreamWriter,
+                          via_proxy: bool) -> tuple[int, int]:
+        totais = {True: 0, False: 0}
+
+        async def repassar(de: asyncio.StreamReader, para: asyncio.StreamWriter, enviado: bool) -> None:
+            try:
+                while bloco := await de.read(65536):
+                    para.write(bloco)
+                    await para.drain()
+                    totais[enviado] += len(bloco)
+                    self._contar(len(bloco), enviado, via_proxy)
+            except (ConnectionResetError, BrokenPipeError, OSError, asyncio.IncompleteReadError):
+                pass
+            finally:
+                try:
+                    para.close()
+                except Exception:
+                    pass
+
+        await asyncio.gather(
+            repassar(leitor_cliente, escritor_destino, True),
+            repassar(leitor_destino, escritor_cliente, False),
+        )
+        return totais[True], totais[False]

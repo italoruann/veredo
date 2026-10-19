@@ -1,0 +1,60 @@
+"""Ponto de entrada: `python -m proxy_manager`."""
+from __future__ import annotations
+
+import sys
+
+
+def main() -> None:
+    from .dependencias_linux import garantir_bibliotecas_qt
+
+    garantir_bibliotecas_qt()  # antes de o Qt carregar o plugin de plataforma
+
+    from PySide6.QtWidgets import QApplication, QSystemTrayIcon
+
+    from .nucleo.configuracao import NOME_EXIBICAO
+    from .interface.contexto import Contexto
+    from .interface.icone import desenhar_icone
+    from .interface.janela_principal import JanelaPrincipal
+    from .interface.tema import aplicar_tema
+
+    app = QApplication(sys.argv)
+    app.setApplicationName(NOME_EXIBICAO)
+    app.setQuitOnLastWindowClosed(False)
+    aplicar_tema(app)
+    app.setWindowIcon(desenhar_icone(False))
+
+    ctx = Contexto()
+    janela = JanelaPrincipal(ctx)
+
+    preferencias = ctx.configuracao.preferencias
+    iniciar_minimizado = "--minimizado" in sys.argv or preferencias.iniciar_minimizado
+    # Sem ícone na bandeja não haveria como reabrir a janela.
+    if not (iniciar_minimizado and preferencias.minimizar_para_bandeja and QSystemTrayIcon.isSystemTrayAvailable()):
+        janela.show()
+
+    _sair_nos_sinais_de_termino(app, janela.sair)
+    sys.exit(app.exec())
+
+
+def _sair_nos_sinais_de_termino(app, sair) -> None:
+    """SIGTERM e Ctrl+C saem pelo mesmo caminho do menu "Sair", desfazendo o proxy do sistema."""
+    import signal
+
+    from PySide6.QtCore import QTimer
+
+    def tratador(_signum, _frame) -> None:
+        sair()
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            signal.signal(sig, tratador)
+        except (ValueError, OSError):
+            pass
+    # Sinais só são tratados quando o Python retoma o controle; o timer garante isso.
+    temporizador = QTimer(app)
+    temporizador.timeout.connect(lambda: None)
+    temporizador.start(300)
+
+
+if __name__ == "__main__":
+    main()

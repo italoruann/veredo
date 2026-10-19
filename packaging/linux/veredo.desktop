@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Veredo
+Comment=Gerenciador de proxy multiplataforma com regras avançadas por aplicativo e domínio
+Exec=/opt/veredo/veredo.sh
+Icon=/opt/veredo/icon.png
+Terminal=false
+Categories=Network;
+StartupNotify=true

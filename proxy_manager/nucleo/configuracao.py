@@ -1,0 +1,264 @@
+"""Configuração persistida: perfis de proxy, aplicativos, regras e preferências."""
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import stat
+import uuid
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
+from typing import Any, Optional
+
+from platformdirs import user_config_dir, user_data_dir
+
+try:
+    import keyring
+except ImportError:  # pragma: no cover
+    keyring = None  # type: ignore[assignment]
+
+NOME_EXIBICAO = "Veredo"
+NOME_APP = "Veredo"
+AUTOR_APP = "Veredo"
+
+# Gravado no lugar da senha quando ela foi guardada no cofre do sistema.
+_MARCADOR_COFRE = "\u0000keyring\u0000"
+_SERVICO_COFRE = "Veredo"
+
+TEXTO_REGRAS_PADRAO = """\
+# Regras avaliadas de cima para baixo; vale a primeira que casar.
+#
+#   apps: chrome, firefox          limita as regras seguintes a esses aplicativos
+#   apps: *                        volta a valer para qualquer aplicativo
+#   *.exemplo.com                  sem sufixo: vai pelo proxy padrão
+#   *.exemplo.com +direct          conexão direta
+#   *.exemplo.com +proxy:Nome      usa um perfil de proxy específico
+#   *.exemplo.com +block           bloqueia
+#   !*.exemplo.com                 regra desativada
+
+*.example.com
+"""
+
+
+def pasta_configuracao() -> Path:
+    caminho = Path(user_config_dir(NOME_APP, AUTOR_APP))
+    caminho.mkdir(parents=True, exist_ok=True)
+    return caminho
+
+
+def pasta_dados() -> Path:
+    caminho = Path(user_data_dir(NOME_APP, AUTOR_APP))
+    caminho.mkdir(parents=True, exist_ok=True)
+    return caminho
+
+
+def arquivo_configuracao() -> Path:
+    return pasta_configuracao() / "config.json"
+
+
+def _filtrar_campos(classe, dados: dict[str, Any]) -> dict[str, Any]:
+    return {nome: dados[nome] for nome in classe.__dataclass_fields__ if nome in dados}
+
+
+@dataclass
+class PerfilProxy:
+    id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
+    nome: str = "Meu Proxy"
+    type: str = "socks5"  # "socks5" ou "http"
+    host: str = ""
+    port: int = 1080
+    usuario: str = ""
+    senha: str = ""
+    ativo: bool = True
+    padrao: bool = False
+
+    def para_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @staticmethod
+    def de_dict(dados: dict[str, Any]) -> PerfilProxy:
+        return PerfilProxy(**_filtrar_campos(PerfilProxy, dados))
+
+
+@dataclass
+class Aplicativo:
+    """Programa cadastrado pelo usuário para facilitar a escrita das regras."""
+    id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
+    nome: str = "Novo aplicativo"
+    caminho_executavel: str = ""
+
+    @property
+    def nome_processo(self) -> str:
+        return os.path.basename(self.caminho_executavel) if self.caminho_executavel else ""
+
+    def para_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @staticmethod
+    def de_dict(dados: dict[str, Any]) -> Aplicativo:
+        return Aplicativo(**_filtrar_campos(Aplicativo, dados))
+
+
+@dataclass
+class Preferencias:
+    porta_socks: int = 58080
+    porta_http: int = 58081
+    porta_pac: int = 58090
+    integracao_sistema_ativa: bool = False
+    acao_padrao: str = "direct"  # "direct" ou "block"
+    dias_retencao_log: int = 14
+    iniciar_minimizado: bool = False
+    minimizar_para_bandeja: bool = False
+    modo_transparente_ativo: bool = False
+    porta_transparente: int = 58095
+
+    def para_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @staticmethod
+    def de_dict(dados: dict[str, Any]) -> Preferencias:
+        return Preferencias(**_filtrar_campos(Preferencias, dados))
+
+
+@dataclass
+class Configuracao:
+    proxies: list[PerfilProxy] = field(default_factory=list)
+    aplicativos: list[Aplicativo] = field(default_factory=list)
+    texto_regras: str = TEXTO_REGRAS_PADRAO
+    preferencias: Preferencias = field(default_factory=Preferencias)
+
+    def proxy_padrao(self) -> Optional[PerfilProxy]:
+        ativos = [p for p in self.proxies if p.ativo]
+        return next((p for p in ativos if p.padrao), ativos[0] if ativos else None)
+
+    def buscar_proxy(self, nome: str) -> Optional[PerfilProxy]:
+        return next((p for p in self.proxies if p.nome == nome), None)
+
+    def garantir_padrao_unico(self) -> None:
+        """Deixa só um perfil marcado como padrão (o primeiro marcado vence)."""
+        achou = False
+        for p in self.proxies:
+            if p.padrao:
+                p.padrao = not achou
+                achou = True
+        if not achou and self.proxies:
+            self.proxies[0].padrao = True
+
+    def para_dict(self) -> dict[str, Any]:
+        return {
+            "proxies": [p.para_dict() for p in self.proxies],
+            "aplicativos": [a.para_dict() for a in self.aplicativos],
+            "texto_regras": self.texto_regras,
+            "preferencias": self.preferencias.para_dict(),
+        }
+
+    @staticmethod
+    def de_dict(dados: dict[str, Any]) -> Configuracao:
+        return Configuracao(
+            proxies=[PerfilProxy.de_dict(p) for p in dados.get("proxies", [])],
+            aplicativos=[Aplicativo.de_dict(a) for a in dados.get("aplicativos", [])],
+            texto_regras=dados.get("texto_regras", TEXTO_REGRAS_PADRAO),
+            preferencias=Preferencias.de_dict(dados.get("preferencias", {})),
+        )
+
+
+def _cofre_gravar(id_perfil: str, senha: str) -> bool:
+    """Retorna False se não houver cofre disponível; nesse caso a senha fica no JSON."""
+    if keyring is None:
+        return False
+    try:
+        keyring.set_password(_SERVICO_COFRE, id_perfil, senha)
+        return True
+    except Exception:
+        return False
+
+
+def _cofre_ler(id_perfil: str) -> Optional[str]:
+    if keyring is None:
+        return None
+    try:
+        return keyring.get_password(_SERVICO_COFRE, id_perfil)
+    except Exception:
+        return None
+
+
+def _cofre_apagar(id_perfil: str) -> None:
+    if keyring is None:
+        return
+    try:
+        keyring.delete_password(_SERVICO_COFRE, id_perfil)
+    except Exception:
+        pass
+
+
+def _ids_proxies_salvos(caminho: Path) -> set[str]:
+    try:
+        with open(caminho, "r", encoding="utf-8") as arq:
+            dados = json.load(arq)
+        return {p["id"] for p in dados.get("proxies", []) if p.get("id")}
+    except (OSError, json.JSONDecodeError, KeyError):
+        return set()
+
+
+def _caminho_backup(caminho: Path) -> Path:
+    return caminho.with_suffix(".json.bak")
+
+
+def _tentar_carregar(caminho: Path) -> Optional[Configuracao]:
+    if not caminho.exists():
+        return None
+    try:
+        with open(caminho, "r", encoding="utf-8") as arq:
+            cfg = Configuracao.de_dict(json.load(arq))
+    except (json.JSONDecodeError, OSError):
+        return None
+    for perfil in cfg.proxies:
+        if perfil.senha == _MARCADOR_COFRE:
+            perfil.senha = _cofre_ler(perfil.id) or ""
+    return cfg
+
+
+def carregar_configuracao() -> Configuracao:
+    caminho = arquivo_configuracao()
+    cfg = _tentar_carregar(caminho)
+    if cfg is not None:
+        return cfg
+
+    # Arquivo ausente ou corrompido: tenta o backup antes de voltar ao padrão.
+    backup = _tentar_carregar(_caminho_backup(caminho))
+    if backup is not None:
+        salvar_configuracao(backup)
+        return backup
+
+    cfg = Configuracao()
+    salvar_configuracao(cfg)
+    return cfg
+
+
+def salvar_configuracao(cfg: Configuracao) -> None:
+    caminho = arquivo_configuracao()
+    temporario = caminho.with_suffix(".json.tmp")
+    ids_removidos = _ids_proxies_salvos(caminho) - {p.id for p in cfg.proxies}
+
+    dados = cfg.para_dict()
+    for dados_proxy, perfil in zip(dados["proxies"], cfg.proxies):
+        if perfil.senha and _cofre_gravar(perfil.id, perfil.senha):
+            dados_proxy["senha"] = _MARCADOR_COFRE
+
+    with open(temporario, "w", encoding="utf-8") as arq:
+        json.dump(dados, arq, indent=2, ensure_ascii=False)
+
+    if caminho.exists():
+        try:
+            shutil.copy2(caminho, _caminho_backup(caminho))
+        except OSError:
+            pass
+
+    os.replace(temporario, caminho)
+    try:
+        os.chmod(caminho, stat.S_IRUSR | stat.S_IWUSR)
+    except OSError:
+        pass
+
+    for id_perfil in ids_removidos:
+        _cofre_apagar(id_perfil)

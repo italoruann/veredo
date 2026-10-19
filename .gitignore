@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+.vscode/
+.idea/
+*.log
+.env
+# Gerados pelo script de build
+packaging/icon.ico
+packaging/icon.png

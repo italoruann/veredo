@@ -1,0 +1,46 @@
+[project]
+name = "veredo"
+version = "0.1.0"
+description = "Cliente de proxy para Windows e Linux com regras por aplicativo e por domínio."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.14"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.14",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+]
+# Versões mínimas escolhidas por serem as primeiras com wheels para Python 3.14.
+dependencies = [
+    "PySide6>=6.10",
+    "psutil>=7.1",
+    "platformdirs>=4.0",
+    "keyring>=25.0",
+    # Modo transparente no Windows (WinDivert). No Linux é usado o nftables do sistema.
+    "pydivert>=2.1; sys_platform == 'win32'",
+]
+
+[project.scripts]
+veredo = "proxy_manager.main:main"
+
+[dependency-groups]
+dev = ["pytest>=8.0"]
+# Empacotamento standalone (scripts/build_windows.ps1 e scripts/build_linux.sh).
+build = ["pyinstaller>=6.16"]
+
+[tool.uv]
+# `uv sync` instala só o grupo dev por padrão; o de build é pedido explicitamente pelos scripts.
+default-groups = ["dev"]
+
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["proxy_manager*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
