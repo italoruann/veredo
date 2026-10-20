@@ -138,3 +138,43 @@ def test_linha_apps_apos_regra_inicia_novo_bloco():
     assert [r.aplicativos for r in conjunto.regras] == [["chrome"], ["firefox"], []]
     reinterpretado = ConjuntoRegras.interpretar(conjunto.para_texto())
     assert [r.aplicativos for r in reinterpretado.regras] == [["chrome"], ["firefox"], []]
+
+
+def test_regra_com_porta_so_casa_na_porta():
+    conjunto = ConjuntoRegras.interpretar("*.site.com:443 +block\n")
+    assert conjunto.regras[0].alvo == "*.site.com"
+    assert conjunto.regras[0].portas == "443"
+    assert conjunto.avaliar("curl", "", "a.site.com", None, porta=443).tipo_acao == "block"
+    assert conjunto.avaliar("curl", "", "a.site.com", None, porta=80).tipo_acao == "direct"
+
+
+def test_lista_e_faixa_de_portas():
+    conjunto = ConjuntoRegras.interpretar("*:22,8000-8100 +block\n")
+    for porta, esperado in ((22, "block"), (8050, "block"), (8101, "direct"), (443, "direct")):
+        assert conjunto.avaliar("x", "", "h.com", None, porta=porta).tipo_acao == esperado
+
+
+def test_ipv6_com_porta_entre_colchetes():
+    conjunto = ConjuntoRegras.interpretar("[2001:db8::1]:443 +block\n2001:db8::/32 +direct\n")
+    assert conjunto.regras[0].alvo == "2001:db8::1"
+    assert conjunto.regras[0].portas == "443"
+    assert conjunto.regras[1].portas == ""
+    assert conjunto.avaliar("x", "", "2001:db8::1", "2001:db8::1", porta=443).tipo_acao == "block"
+    assert conjunto.avaliar("x", "", "2001:db8::1", "2001:db8::1", porta=80).tipo_acao == "direct"
+
+
+def test_portas_invalidas_nunca_casam():
+    conjunto = ConjuntoRegras.interpretar("*:abc +block\n*:0 +block\n*:90-80 +block\n")
+    assert conjunto.avaliar("x", "", "h.com", None, porta=80, acao_padrao="direct").tipo_acao == "direct"
+
+
+def test_porta_volta_ao_texto():
+    texto = "apps: *\n*.site.com:80,443 +direct\n[::1]:8080 +block\n"
+    assert ConjuntoRegras.interpretar(texto).para_texto() == texto
+
+
+def test_faixa_de_ips():
+    assert padrao_corresponde("10.0.0.1-10.0.0.50", None, "10.0.0.20")
+    assert not padrao_corresponde("10.0.0.1-10.0.0.50", None, "10.0.0.51")
+    # Domínio com hífen continua sendo domínio.
+    assert padrao_corresponde("meu-site.com", "meu-site.com", None)

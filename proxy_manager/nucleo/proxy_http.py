@@ -7,6 +7,8 @@ import base64
 from dataclasses import dataclass, field
 from urllib.parse import urlsplit
 
+from . import rede
+
 
 class ErroProxyHttp(Exception):
     pass
@@ -107,7 +109,7 @@ async def ler_linha_status(leitor: asyncio.StreamReader, timeout: float = 20.0) 
 async def conectar_via_http(host: str, port: int, host_destino: str, porta_destino: int,
                             usuario: str = "", senha: str = "",
                             timeout: float = 15.0) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
-    leitor, escritor = await asyncio.wait_for(asyncio.open_connection(host, port), timeout=timeout)
+    leitor, escritor = await rede.abrir_conexao(host, port, timeout=timeout)
     try:
         auth = auth_basica(usuario, senha) if usuario else None
         escritor.write(requisicao_connect(host_destino, porta_destino, auth))

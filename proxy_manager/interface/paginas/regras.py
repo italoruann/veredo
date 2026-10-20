@@ -12,13 +12,14 @@ from PySide6.QtWidgets import (
 
 from ..contexto import Contexto
 from ...nucleo.configuracao import TEXTO_REGRAS_PADRAO, Aplicativo
-from ...nucleo.regras import Regra, ConjuntoRegras
+from ...nucleo.regras import Regra, ConjuntoRegras, dividir_alvo
 from ..componentes.responsivo import LinhasResponsivas
 from ..componentes.realce_regras import RealceRegras
 
 ROTULOS_COLUNAS = ["Ativo", "Aplicativos", "Alvo", "Ação"]
 # Cabeçalhos curtos para caber no painel lateral; a explicação completa fica no tooltip.
-DICAS_COLUNAS = ["", "Vazio = qualquer aplicativo", "Domínio, IP ou CIDR (* = qualquer destino)", ""]
+DICAS_COLUNAS = ["", "Vazio = qualquer aplicativo",
+                 "Domínio, IP, faixa ou CIDR (* = qualquer destino); portas opcionais: *.site.com:443, *:80,8000-8100", ""]
 ROTULOS_COLUNAS_APPS = ["Nome", "Executável"]
 
 DIGITAR_MANUALMENTE = "✎ Digitar manualmente…"
@@ -310,7 +311,7 @@ class PaginaRegras(QWidget):
         self.tabela.setRowCount(0)
         for regra in conjunto_regras.regras:
             linha = self.tabela.rowCount()
-            self._inserir_linha(linha, aplicativos=", ".join(regra.aplicativos), alvo=regra.alvo,
+            self._inserir_linha(linha, aplicativos=", ".join(regra.aplicativos), alvo=regra.alvo_completo,
                                 tipo_acao=regra.tipo_acao, nome_proxy=regra.nome_proxy,
                                 ativo=regra.ativo)
 
@@ -327,7 +328,9 @@ class PaginaRegras(QWidget):
                 acao = f"proxy:{nome_proxy}"
             else:
                 acao = tipo
-            regras.append(Regra(aplicativos=aplicativos, alvo=alvo, acao=acao, ativo=dados["enabled"]))
+            alvo, portas = dividir_alvo(alvo)
+            regras.append(Regra(aplicativos=aplicativos, alvo=alvo, portas=portas, acao=acao,
+                                ativo=dados["enabled"]))
         return ConjuntoRegras(regras)
 
     def _ao_adicionar_linha(self) -> None:
@@ -387,7 +390,9 @@ class PaginaRegras(QWidget):
             "(<code>apps: *</code> volta a valer para todos); várias linhas <code>apps:</code> "
             "seguidas somam os apps. Cada regra é "
             "<code>padrao.dominio.com [+direct|+block|+proxy:nome]</code>; sem sufixo, "
-            "usa o proxy padrão. Prefixe com <code>!</code> para desabilitar uma regra sem apagá-la."
+            "usa o proxy padrão. Para limitar a portas, use <code>alvo:443</code>, "
+            "<code>*:80,8000-8100</code> ou <code>[::1]:443</code> (sem espaços). "
+            "Prefixe com <code>!</code> para desabilitar uma regra sem apagá-la."
         )
         rotulo_ajuda.setWordWrap(True)
         rotulo_ajuda.setObjectName("DicaCartao")
