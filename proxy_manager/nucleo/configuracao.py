@@ -148,6 +148,9 @@ class Preferencias:
     # Prevenção de vazamento: DNS pelo proxy, consultas DNS que não são de endereço respondidas
     # vazias e todo UDP de saída bloqueado (WebRTC, QUIC).
     prevenir_vazamento: bool = False
+    # UDP pelas regras (só no modo transparente): cada fluxo UDP vai direto, é bloqueado ou passa
+    # por um proxy SOCKS5, como o TCP. Desligado, só o QUIC é bloqueado.
+    udp_pelas_regras: bool = False
 
     @property
     def dns_ativo(self) -> bool:

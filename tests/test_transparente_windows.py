@@ -1,4 +1,6 @@
 """Tradução de pacotes do modo transparente no Windows, com pacotes falsos (sem pydivert)."""
+import pytest
+
 from proxy_manager.nucleo.transparente.windows_windivert import ModoTransparenteWindows
 
 
@@ -216,3 +218,34 @@ def test_syn_do_proprio_motor_nao_e_capturado():
         assert pacote.dst_addr == "203.0.113.10"
     finally:
         rede.liberar_porta(53300)
+
+
+def test_udp_pelas_regras_entrega_o_datagrama_ao_motor_e_descarta_o_original():
+    recebidos = []
+    backend = ModoTransparenteWindows(58095, porta_dns=58053, capturar_udp=True)
+    backend.ao_receber_udp = lambda origem, destino, dados, responder: recebidos.append((origem, destino, dados))
+    assert "outbound and !loopback)" in backend.filtro()
+
+    pacote = _PacoteUdpFalso(True, "192.168.1.50", "203.0.113.7", _UdpFalso(50000, 3478))
+    pacote.payload = b"stun"
+    assert backend._traduzir_udp(pacote) is None
+    assert recebidos == [(("192.168.1.50", 50000), ("203.0.113.7", 3478), b"stun")]
+
+    # multicast/broadcast da rede local passam sem ir às regras
+    mdns = _PacoteUdpFalso(True, "192.168.1.50", "224.0.0.251", _UdpFalso(5353, 5353))
+    assert backend._traduzir_udp(mdns) is False
+    # DNS continua indo para o servidor local
+    consulta = _PacoteUdpFalso(True, "192.168.1.50", "192.168.1.1", _UdpFalso(61000, 53))
+    assert backend._traduzir_udp(consulta) is True and consulta.udp.dst_port == 58053
+
+
+def test_pacote_de_resposta_montado_e_valido():
+    pydivert = pytest.importorskip("pydivert")
+    from proxy_manager.nucleo.transparente.windows_windivert import montar_pacote_udp
+
+    for origem, destino in ((("203.0.113.7", 3478), ("192.168.1.50", 50000)),
+                            (("2001:db8::7", 3478), ("2001:db8::50", 50000))):
+        pacote = pydivert.Packet(montar_pacote_udp(origem, destino, b"resposta"), None, pydivert.Direction.INBOUND)
+        assert (pacote.src_addr, pacote.src_port) == origem
+        assert (pacote.dst_addr, pacote.dst_port) == destino
+        assert bytes(pacote.payload) == b"resposta"
