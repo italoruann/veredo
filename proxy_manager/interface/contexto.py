@@ -7,7 +7,7 @@ import threading
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
-from ..nucleo import integracao_sistema
+from ..nucleo import integracao_sistema, servico
 from ..nucleo.configuracao import Configuracao, carregar_configuracao, salvar_configuracao
 from ..nucleo.estado_ip_saida import carregar_ips_saida, salvar_ips_saida
 from ..nucleo.motor import MotorProxy
@@ -30,14 +30,15 @@ class Contexto(QObject):
         super().__init__()
         self.configuracao: Configuracao = carregar_configuracao()
         self.registro = Registro(dias_retencao=self.configuracao.preferencias.dias_retencao_log)
-        self.motor = MotorProxy(self.configuracao, self.registro)
-        self.motor.ao_mudar_estado = self._ao_mudar_estado
-        self.motor.ao_mudar_ip_saida = self._ao_mudar_ip_saida
         self.registro.inscrever(self._ao_registrar)
-
         # id do perfil -> (IP anterior, IP atual), preservado entre execuções.
         self.ips_saida: dict[str, tuple[str, str]] = carregar_ips_saida()
-        self.motor.restaurar_ips_saida({id_perfil: atual for id_perfil, (_, atual) in self.ips_saida.items()})
+        # Com o serviço do sistema rodando, a janela só o controla; senão o motor roda aqui.
+        if servico.servico_disponivel():
+            self._usar_motor(servico.MotorRemoto(self.registro))
+            self.motor.atualizar_configuracao(self.configuracao)
+        else:
+            self._usar_motor(MotorProxy(self.configuracao, self.registro))
         self.aviso_voz = AvisoVoz(self)
 
         self._trava_pendentes = threading.Lock()
@@ -57,6 +58,40 @@ class Contexto(QObject):
             # Se a última execução terminou sem limpar, o sistema ainda aponta para um PAC que não
             # responde. Remove agora; a configuração volta quando o motor for iniciado.
             self._sincronizar_proxy_sistema(aplicando=False)
+
+    @property
+    def usando_servico(self) -> bool:
+        return getattr(self.motor, "remoto", False)
+
+    def _usar_motor(self, motor) -> None:
+        self.motor = motor
+        self.motor.ao_mudar_estado = self._ao_mudar_estado
+        self.motor.ao_mudar_ip_saida = self._ao_mudar_ip_saida
+        self.motor.restaurar_ips_saida({id_perfil: atual for id_perfil, (_, atual) in self.ips_saida.items()})
+
+    def conectar_servico(self) -> None:
+        """Passa a controlar o serviço recém-instalado: o motor local para e o serviço recebe a configuração."""
+        if self.usando_servico:
+            return
+        self.motor.parar()
+        self._usar_motor(servico.MotorRemoto(self.registro))
+        self.motor.atualizar_configuracao(self.configuracao)
+        self.motor.iniciar()
+
+    def desconectar_servico(self) -> None:
+        """Volta ao motor local (parado), depois de remover o serviço."""
+        if not self.usando_servico:
+            return
+        self.motor.desconectar()
+        self._usar_motor(MotorProxy(self.configuracao, self.registro))
+        self.estado_mudou.emit(False, "Motor parado")
+
+    def encerrar(self) -> None:
+        """Ao fechar a janela: para o motor local; o serviço continua rodando."""
+        if self.usando_servico:
+            self.motor.desconectar()
+        else:
+            self.motor.parar()
 
     def _ao_registrar(self, evento: str, entrada: EntradaLog) -> None:
         # Thread do motor: só enfileira.

@@ -3,8 +3,8 @@
 Cliente de proxy para Windows e Linux. Você diz quais programas e quais sites passam pelo
 proxy, quais vão direto e quais são bloqueados, e acompanha cada conexão em tempo real.
 
-Funciona com proxies SOCKS5 e HTTP, com ou sem usuário e senha, e permite ter vários perfis
-cadastrados ao mesmo tempo.
+Funciona com proxies SOCKS5, SOCKS4/4A, HTTP e HTTPS, com ou sem usuário e senha, permite ter
+vários perfis cadastrados ao mesmo tempo e encadeá-los (cadeias de proxy).
 
 > O projeto está em fase de testes. Se encontrar algum problema, abra uma issue contando o
 > sistema operacional, o que você fez e o que apareceu no log.
@@ -83,7 +83,10 @@ anuncios.exemplo.com +block
 | `site.com`               | vai pelo proxy padrão                                        |
 | `site.com +direct`       | vai direto, sem proxy                                        |
 | `site.com +proxy:Nome`   | vai pelo perfil de proxy com esse nome                       |
+| `site.com +chain:Nome`   | vai pela cadeia de proxy com esse nome                       |
 | `site.com +block`        | a conexão é recusada                                         |
+| `site.com:443`           | só a porta 443 (também `:80;443`, `:8000-8100`)               |
+| `10.0.0.1-10.0.0.50`     | faixa de IPs                                                 |
 | `apps: a, b`             | as linhas seguintes valem só para esses programas            |
 | `apps: *`                | as linhas seguintes voltam a valer para qualquer programa    |
 | `!site.com`              | regra desativada (fica no texto, mas é ignorada)             |
@@ -96,13 +99,31 @@ Alguns detalhes:
 - Conexões que não casam com nenhuma regra seguem a ação padrão, definida nas Configurações
   (direto ou bloquear).
 - O alvo pode ser um domínio (`exemplo.com`), um curinga (`*.exemplo.com`, que também pega o
-  próprio `exemplo.com`), um IP (`192.168.0.10`) ou uma faixa CIDR (`10.0.0.0/8`). `*` sozinho
-  pega qualquer destino.
+  próprio `exemplo.com`), um IP (`192.168.0.10`, ou `[2001:db8::1]` em IPv6), uma faixa CIDR
+  (`10.0.0.0/8`) ou um intervalo (`10.0.0.1-10.0.0.50`). `*` sozinho pega qualquer destino.
+  Depois do alvo podem vir portas: `*:22`, `*.exemplo.com:80;443`, `*:5000-6000`.
+- Conexões para as portas do próprio Veredo são bloqueadas (evita loop), e as que vão ao
+  endereço de um proxy cadastrado saem direto.
 - O programa é identificado pelo nome do executável, sem diferença entre maiúsculas e
   minúsculas e com ou sem `.exe`. Na seção **Aplicativos cadastrados** da tela de regras dá para
   escolher o executável em vez de digitar o nome.
 - Duas linhas `apps:` seguidas se somam: `apps: chrome` e `apps: firefox` em sequência valem
   para os dois.
+
+## Cadeias de proxy
+
+Em **Perfil > Cadeias de proxy** (Ctrl+4) você junta perfis numa cadeia e a usa nas regras com
+`+chain:Nome`. Há três tipos:
+
+- **Simples:** a conexão passa por todos os proxies, um dentro do outro, na ordem da lista.
+- **Redundância:** usa o primeiro que responder; se ele cair, tenta o próximo.
+- **Balanceamento:** alterna o proxy de saída a cada conexão, pulando os que não respondem.
+
+## Importar e exportar perfil
+
+**Arquivo > Exportar perfil** grava proxies, cadeias, aplicativos e regras num arquivo JSON (as
+senhas vão junto só se você pedir). **Arquivo > Importar perfil** lê esse arquivo ou um perfil
+`.ppx` do Proxifier, substituindo a configuração atual depois de confirmar.
 
 ## Como o tráfego chega ao Veredo
 
@@ -112,7 +133,7 @@ O Veredo abre três portas locais em `127.0.0.1`:
 
 | Porta | Uso                                                        |
 | ----- | ---------------------------------------------------------- |
-| 58080 | proxy SOCKS5                                               |
+| 58080 | proxy SOCKS5 (também aceita SOCKS4/4A e UDP ASSOCIATE)      |
 | 58081 | proxy HTTP/HTTPS                                           |
 | 58090 | arquivo PAC (`http://127.0.0.1:58090/proxy.pac`)           |
 
@@ -138,8 +159,41 @@ Ativado em **Configurações > Modo transparente**. As conexões são intercepta
 sistema, então até programas que ignoram a configuração de proxy passam pelas regras. No Linux
 é usado o `nftables`; no Windows, o driver WinDivert.
 
+TCP sobre IPv4 e IPv6 é interceptado. Opções do mesmo cartão:
+
+- **DNS pelo proxy:** um servidor DNS local responde aos programas com endereços falsos
+  (`198.18.x.x`). Quando o programa conecta num deles, o Veredo sabe o nome do site, aplica as
+  regras por domínio e manda o nome para o proxy resolver. Os nomes da lista de exceções vão ao
+  DNS normal.
+- **Prevenção de vazamento:** liga o DNS pelo proxy, responde vazio às consultas DNS que não são
+  de endereço e bloqueia o UDP que sairia direto (o WebRTC revelaria o seu IP).
+- **UDP pelas regras:** cada fluxo UDP (jogos, chamadas, QUIC) segue as regras: direto,
+  bloqueado ou por um proxy SOCKS5 que aceite UDP. Desligado, só o QUIC é bloqueado, para os
+  navegadores usarem TCP. No Linux usa TPROXY.
+
 Este modo exige administrador (Windows) ou root (Linux). Veja abaixo como gerar o executável
-com essa permissão.
+com essa permissão, ou use o serviço do sistema.
+
+### Serviço do sistema
+
+Em **Configurações > Serviço do sistema**, **Instalar serviço** faz o motor rodar sem a janela,
+iniciado com o computador e antes de qualquer login. No Windows é uma tarefa agendada que roda
+como SYSTEM; no Linux, a unidade `veredo.service` do systemd. A janela passa a controlar o
+serviço: liga e desliga o motor, envia a configuração e mostra o log ao vivo. Fechar a janela
+não para o serviço.
+
+Também dá para usar pela linha de comando (como administrador/root):
+
+```bash
+uv run python -m proxy_manager --instalar-servico
+uv run python -m proxy_manager --remover-servico
+uv run python -m proxy_manager --servico   # roda o serviço em primeiro plano
+```
+
+O serviço guarda a configuração, com as senhas, em `%ProgramData%\Veredo\servico.json` ou
+`/var/lib/veredo/servico.json`, legível só pelo administrador. O canal de controle escuta em
+`127.0.0.1:58098` e exige o token de `controle.token`, na mesma pasta: isso impede páginas da
+web de comandar o serviço, mas qualquer usuário da máquina pode configurá-lo.
 
 ## Gerar o executável
 
@@ -181,14 +235,19 @@ Secret Service no Linux). Se não houver cofre disponível, ficam no `config.jso
 
 ## Limitações
 
-- Só TCP sobre IPv4. QUIC/HTTP3 e IPv6 não passam pelo proxy. No modo transparente do Linux
-  eles são bloqueados para que os programas voltem ao TCP/IPv4.
+- UDP só passa por proxies SOCKS5, e não por cadeias simples (um proxy dentro do outro). No
+  modo explícito, UDP só passa se o programa usar o UDP ASSOCIATE do SOCKS5.
 - Regras por domínio em conexões SOCKS5 só funcionam se o programa enviar o nome do site ao
-  proxy (DNS remoto). Se ele mandar só o IP, valem apenas as regras por IP e CIDR.
+  proxy (DNS remoto). Se ele mandar só o IP, valem apenas as regras por IP e CIDR. No modo
+  transparente, o DNS pelo proxy resolve isso.
+- Autenticação NTLM/Kerberos em proxies HTTP não é suportada (só usuário e senha).
+- No Linux, o modo transparente não intercepta os programas do mesmo usuário que roda o Veredo
+  (é assim que ele evita capturar a si mesmo). Rodando como root ou como serviço, os programas
+  do root saem direto.
 - No Linux, navegadores baseados em Chromium só pegam o proxy quando abertos pelo menu ou por
   um link de outro programa. Pelo terminal, passe `--proxy-pac-url=http://127.0.0.1:58090/proxy.pac`.
-- O modo transparente no Windows e o pacote para Linux ainda não foram testados em máquinas
-  reais. Use com cuidado.
+- O modo transparente (Windows e Linux), o DNS pelo proxy, o UDP pelas regras, o serviço do
+  sistema e o pacote para Linux ainda não foram testados em máquinas reais. Use com cuidado.
 
 ## Desenvolvimento
 

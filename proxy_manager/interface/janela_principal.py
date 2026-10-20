@@ -691,12 +691,12 @@ class JanelaPrincipal(QMainWindow):
             self.hide()
 
     def sair(self) -> None:
-        self.ctx.motor.parar()
+        self.ctx.encerrar()
         QApplication.instance().quit()
 
     def closeEvent(self, evento) -> None:  # noqa: N802 (Qt override)
         if self.bandeja is None or not self.ctx.configuracao.preferencias.minimizar_para_bandeja:
-            self.ctx.motor.parar()
+            self.ctx.encerrar()
             evento.accept()
             QApplication.instance().quit()
             return
