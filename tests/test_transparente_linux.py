@@ -60,10 +60,14 @@ def test_iniciar_aplica_regras_nftables(root_falso, comandos_registrados):
     # a exclusão do próprio tráfego (evita loop) precisa existir
     chamadas_dono = [c for c in comandos_registrados if "skuid" in c]
     assert chamadas_dono, "deveria excluir o próprio uid do redirect pra evitar loop"
-    # QUIC e TCP/IPv6 não são interceptáveis: precisam ser rejeitados pra não vazarem direto
+    # QUIC não é interceptável: precisa ser rejeitado pra não vazar direto
     chamadas_rejeitar = [c for c in comandos_registrados if "reject" in c]
     assert any("udp" in c and "443" in c for c in chamadas_rejeitar), "QUIC deveria ser rejeitado"
-    assert any("ipv6" in c and "tcp" in c for c in chamadas_rejeitar), "TCP/IPv6 deveria ser rejeitado"
+    # TCP de qualquer família (IPv4 e IPv6) é redirecionado; nenhum TCP é rejeitado
+    assert any("tcp" in c and "nfproto" not in c for c in chamadas_redirecionar)
+    assert not any("tcp" in c for c in chamadas_rejeitar)
+    # sem DNS pelo proxy, a porta 53 não é desviada
+    assert not any("53" in c for c in comandos_registrados)
     # tudo isolado numa tabela própria (nunca mexe em OUTPUT/chains do sistema)
     assert all("OUTPUT" not in c for c in comandos_registrados)
 
@@ -128,3 +132,20 @@ def test_iniciar_explica_como_instalar_nft(root_falso, monkeypatch):
     ok, mensagem = mod.ModoTransparenteLinux(58095).iniciar()
     assert ok is False
     assert "apt install nftables" in mensagem
+
+
+def test_dns_pelo_proxy_desvia_porta_53_antes_da_excecao_de_loopback():
+    comandos = ModoTransparenteLinux(58095, porta_dns=58053).comandos("1000")
+    nat = [c for c in comandos if "output" in c and c[:3] == ["nft", "add", "rule"]]
+    indice_dns = next(i for i, c in enumerate(nat) if "53" in c and ":58053" in c)
+    indice_loopback = next(i for i, c in enumerate(nat) if "127.0.0.0/8" in c)
+    indice_dono = next(i for i, c in enumerate(nat) if "skuid" in c)
+    # o próprio Veredo consulta o DNS real sem desvio; o resto (até o 127.0.0.53) vem para cá
+    assert indice_dono < indice_dns < indice_loopback
+
+
+def test_prevencao_de_vazamento_rejeita_todo_udp():
+    comandos = ModoTransparenteLinux(58095, porta_dns=58053, bloquear_todo_udp=True).comandos("1000")
+    rejeitar = [c for c in comandos if "reject" in c]
+    assert rejeitar == [["nft", "add", "rule", "inet", mod.NOME_TABELA, "block_unsupported",
+                         "meta", "l4proto", "udp", "reject"]]

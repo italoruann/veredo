@@ -327,13 +327,59 @@ class PaginaConfiguracoes(QWidget):
         dica = QLabel(
             "Intercepta as conexões no próprio sistema, inclusive de programas que ignoram a "
             f"configuração de proxy. Exige abrir o {NOME_EXIBICAO} como administrador (Windows) "
-            "ou root (Linux). No Linux usa o nftables; no Windows, o driver WinDivert. Só TCP "
-            "sobre IPv4 é interceptado. "
+            "ou root (Linux). No Linux usa o nftables; no Windows, o driver WinDivert. TCP "
+            "(IPv4 e IPv6) é interceptado; QUIC é bloqueado para os navegadores usarem TCP. "
             "Liga e desliga junto com o motor; com o motor ligado, a mudança vale ao salvar."
         )
         dica.setWordWrap(True)
         dica.setObjectName("DicaCartao")
         layout.addWidget(dica)
+
+        self.caixa_dns = QCheckBox("Resolver nomes pelo proxy (DNS pelo proxy)")
+        self.caixa_dns.setChecked(preferencias.dns_pelo_proxy)
+        layout.addWidget(caixa_com_quebra(self.caixa_dns))
+        form_dns = QFormLayout()
+        self.campo_dns_excecoes = QLineEdit(preferencias.dns_excecoes)
+        self.campo_dns_excecoes.setToolTip("Nomes resolvidos pelo DNS normal, separados por ponto e vírgula")
+        self.campo_dns_servidores = QLineEdit(preferencias.dns_servidores)
+        self.campo_dns_servidores.setPlaceholderText("automático (os do sistema)")
+        self.campo_dns_servidores.setToolTip(
+            "Servidores DNS reais usados pelo próprio Veredo e para as exceções, separados por "
+            "ponto e vírgula (ex.: 192.168.1.1; 1.1.1.1). Porta opcional: 192.168.1.1:5353")
+        self.campo_porta_dns = QSpinBox()
+        self.campo_porta_dns.setRange(1024, 65535)
+        self.campo_porta_dns.setValue(preferencias.porta_dns)
+        form_dns.addRow("Não resolver pelo proxy", self.campo_dns_excecoes)
+        form_dns.addRow("Servidores DNS reais", self.campo_dns_servidores)
+        form_dns.addRow("Porta do DNS local", self.campo_porta_dns)
+        layout.addLayout(form_dns)
+
+        dica_dns = QLabel(
+            "Os programas recebem endereços falsos (198.18.x.x) e o nome do site vai para o proxy, "
+            "que faz a consulta DNS do lado dele. Assim as regras por domínio valem para qualquer "
+            "programa e o seu provedor não vê quais sites você acessa pelo proxy."
+        )
+        dica_dns.setWordWrap(True)
+        dica_dns.setObjectName("DicaCartao")
+        layout.addWidget(dica_dns)
+
+        self.caixa_vazamento = QCheckBox("Prevenção de vazamento de DNS e IP")
+        self.caixa_vazamento.setChecked(preferencias.prevenir_vazamento)
+        layout.addWidget(caixa_com_quebra(self.caixa_vazamento))
+        dica_vazamento = QLabel(
+            "Liga o DNS pelo proxy, responde vazio às consultas DNS que não são de endereço "
+            "(MX, TXT, SRV...) e bloqueia todo o UDP de saída, o que impede o WebRTC de revelar "
+            "o seu IP. Jogos, chamadas de voz e VPNs que usam UDP deixam de funcionar."
+        )
+        dica_vazamento.setWordWrap(True)
+        dica_vazamento.setObjectName("DicaCartao")
+        layout.addWidget(dica_vazamento)
+
+        self._widgets_dns = [self.caixa_dns, self.campo_dns_excecoes, self.campo_dns_servidores,
+                             self.campo_porta_dns, self.caixa_vazamento]
+        self.caixa_transparente.toggled.connect(self._atualizar_widgets_dns)
+        self.caixa_vazamento.toggled.connect(self._atualizar_widgets_dns)
+        self._atualizar_widgets_dns()
 
         botao_salvar = QPushButton("Salvar")
         botao_salvar.setObjectName("BotaoPrincipal")
@@ -348,16 +394,40 @@ class PaginaConfiguracoes(QWidget):
         layout.addWidget(self.rotulo_transparente)
         return quadro
 
+    def _atualizar_widgets_dns(self) -> None:
+        transparente = self.caixa_transparente.isChecked()
+        for widget in self._widgets_dns:
+            widget.setEnabled(transparente)
+        if self.caixa_vazamento.isChecked():
+            # A prevenção de vazamento sempre usa o DNS pelo proxy.
+            self.caixa_dns.setChecked(True)
+            self.caixa_dns.setEnabled(False)
+
+    def _carregar_transparente(self) -> None:
+        preferencias = self.ctx.configuracao.preferencias
+        self.caixa_transparente.setChecked(preferencias.modo_transparente_ativo)
+        self.campo_porta_transparente.setValue(preferencias.porta_transparente)
+        self.caixa_vazamento.setChecked(preferencias.prevenir_vazamento)
+        self.caixa_dns.setChecked(preferencias.dns_pelo_proxy)
+        self.campo_dns_excecoes.setText(preferencias.dns_excecoes)
+        self.campo_dns_servidores.setText(preferencias.dns_servidores)
+        self.campo_porta_dns.setValue(preferencias.porta_dns)
+        self._atualizar_widgets_dns()
+
     def _ao_salvar_transparente(self) -> None:
         preferencias = self.ctx.configuracao.preferencias
         preferencias.modo_transparente_ativo = self.caixa_transparente.isChecked()
         preferencias.porta_transparente = self.campo_porta_transparente.value()
+        preferencias.prevenir_vazamento = self.caixa_vazamento.isChecked()
+        preferencias.dns_pelo_proxy = self.caixa_dns.isChecked() or preferencias.prevenir_vazamento
+        preferencias.dns_excecoes = self.campo_dns_excecoes.text().strip()
+        preferencias.dns_servidores = self.campo_dns_servidores.text().strip()
+        preferencias.porta_dns = self.campo_porta_dns.value()
 
         if self.ctx.motor.em_execucao():
             ok, mensagem = self.ctx.aplicar_ao_vivo()
             # Em caso de falha os valores anteriores foram restaurados.
-            self.caixa_transparente.setChecked(preferencias.modo_transparente_ativo)
-            self.campo_porta_transparente.setValue(preferencias.porta_transparente)
+            self._carregar_transparente()
             self.rotulo_transparente.setText(mensagem)
         else:
             self.ctx.aplicar_mudancas()

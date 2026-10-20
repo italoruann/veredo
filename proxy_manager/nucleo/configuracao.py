@@ -140,6 +140,18 @@ class Preferencias:
     modo_transparente_ativo: bool = False
     porta_transparente: int = 58095
     aviso_voz_ip_ativo: bool = True
+    # DNS pelo proxy (só no modo transparente): nomes viram IPs falsos e o proxy resolve.
+    dns_pelo_proxy: bool = False
+    dns_excecoes: str = "localhost; *.local; *.lan; *.home.arpa; *.localdomain"
+    dns_servidores: str = ""  # vazio = os servidores DNS do sistema
+    porta_dns: int = 58053
+    # Prevenção de vazamento: DNS pelo proxy, consultas DNS que não são de endereço respondidas
+    # vazias e todo UDP de saída bloqueado (WebRTC, QUIC).
+    prevenir_vazamento: bool = False
+
+    @property
+    def dns_ativo(self) -> bool:
+        return self.modo_transparente_ativo and (self.dns_pelo_proxy or self.prevenir_vazamento)
 
     def para_dict(self) -> dict[str, Any]:
         return asdict(self)
