@@ -375,8 +375,20 @@ class PaginaConfiguracoes(QWidget):
         dica_vazamento.setObjectName("DicaCartao")
         layout.addWidget(dica_vazamento)
 
+        self.caixa_udp = QCheckBox("Encaminhar UDP pelas regras (jogos, chamadas, QUIC)")
+        self.caixa_udp.setChecked(preferencias.udp_pelas_regras)
+        layout.addWidget(caixa_com_quebra(self.caixa_udp))
+        dica_udp = QLabel(
+            "Cada fluxo UDP segue as regras como uma conexão: direto, bloqueado ou por um proxy "
+            "SOCKS5 que aceite UDP (HTTP, HTTPS e SOCKS4 não transportam UDP). Com a prevenção "
+            "de vazamento, o UDP que iria direto é bloqueado. Desligado, só o QUIC é bloqueado."
+        )
+        dica_udp.setWordWrap(True)
+        dica_udp.setObjectName("DicaCartao")
+        layout.addWidget(dica_udp)
+
         self._widgets_dns = [self.caixa_dns, self.campo_dns_excecoes, self.campo_dns_servidores,
-                             self.campo_porta_dns, self.caixa_vazamento]
+                             self.campo_porta_dns, self.caixa_vazamento, self.caixa_udp]
         self.caixa_transparente.toggled.connect(self._atualizar_widgets_dns)
         self.caixa_vazamento.toggled.connect(self._atualizar_widgets_dns)
         self._atualizar_widgets_dns()
@@ -412,6 +424,7 @@ class PaginaConfiguracoes(QWidget):
         self.campo_dns_excecoes.setText(preferencias.dns_excecoes)
         self.campo_dns_servidores.setText(preferencias.dns_servidores)
         self.campo_porta_dns.setValue(preferencias.porta_dns)
+        self.caixa_udp.setChecked(preferencias.udp_pelas_regras)
         self._atualizar_widgets_dns()
 
     def _ao_salvar_transparente(self) -> None:
@@ -423,6 +436,7 @@ class PaginaConfiguracoes(QWidget):
         preferencias.dns_excecoes = self.campo_dns_excecoes.text().strip()
         preferencias.dns_servidores = self.campo_dns_servidores.text().strip()
         preferencias.porta_dns = self.campo_porta_dns.value()
+        preferencias.udp_pelas_regras = self.caixa_udp.isChecked()
 
         if self.ctx.motor.em_execucao():
             ok, mensagem = self.ctx.aplicar_ao_vivo()

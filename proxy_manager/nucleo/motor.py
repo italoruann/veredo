@@ -1,5 +1,6 @@
 """Motor do proxy: abre as portas locais (SOCKS5, HTTP, PAC e transparente), aplica as regras
-a cada conexão e repassa os bytes entre o aplicativo e o destino."""
+a cada conexão e repassa os bytes entre o aplicativo e o destino. Datagramas UDP (UDP ASSOCIATE
+da porta SOCKS ou capturados no modo transparente) passam pelas mesmas regras, por fluxo."""
 from __future__ import annotations
 
 import asyncio
@@ -9,7 +10,7 @@ import threading
 import time
 from typing import Callable, Optional, Protocol
 
-from . import cliente_proxy, dns, processos, proxy_http, rede, socks5, verificacao_ip
+from . import cliente_proxy, dns, processos, proxy_http, rede, socks5, udp, verificacao_ip
 from .cliente_proxy import Rota
 from .configuracao import Configuracao, PerfilProxy, Preferencias
 from .integracao_sistema import gerar_script_pac, iniciar_servidor_pac
@@ -29,11 +30,19 @@ class BackendTransparente(Protocol):
     def iniciar(self) -> tuple[bool, str]: ...
     def parar(self) -> tuple[bool, str]: ...
     def resolver_destino(self, escritor: asyncio.StreamWriter, porta_origem: int) -> Optional[tuple[str, int]]: ...
+    # Opcional: com "UDP pelas regras" o backend entrega cada datagrama capturado por aqui.
+    # ao_receber_udp: Callable[[origem, destino, dados, responder], None]
+
+
+class _AssociacaoSocks:
+    """Um UDP ASSOCIATE de um programa na porta SOCKS local; identifica os fluxos dele."""
+    def __init__(self, proc: processos.InfoProcesso):
+        self.proc = proc
 
 
 def _criar_backend_transparente(prefs: Preferencias) -> Optional[BackendTransparente]:
     argumentos = (prefs.porta_transparente, prefs.porta_dns if prefs.dns_ativo else None,
-                  prefs.prevenir_vazamento)
+                  prefs.prevenir_vazamento, prefs.udp_pelas_regras)
     sistema = platform.system()
     if sistema == "Linux":
         from .transparente.linux_nftables import ModoTransparenteLinux
@@ -87,6 +96,9 @@ class MotorProxy:
         self.tabela_dns = dns.TabelaIpsFalsos()
         self._escritores_ativos: set[asyncio.StreamWriter] = set()
         self._tarefas_fundo: set[asyncio.Task] = set()
+        self.udp: Optional[udp.GerenciadorUdp] = None
+        # id da entrada de log de um fluxo UDP -> início (para a duração)
+        self._inicio_udp: dict[str, float] = {}
 
         # A chave do cache inclui host/porta/tipo para que editar o perfil invalide o valor.
         self._cache_ip_saida: dict[str, tuple[float, str]] = {}
@@ -191,6 +203,8 @@ class MotorProxy:
 
     async def _iniciar_servidores(self) -> None:
         prefs = self.configuracao.preferencias
+        self.udp = udp.GerenciadorUdp(self._decidir_udp, self._finalizar_udp, self._contar)
+        self.udp.iniciar()
         try:
             self._servidor_socks = await asyncio.start_server(self._atender_socks, "127.0.0.1", prefs.porta_socks)
             self._servidor_http = await asyncio.start_server(self._atender_http, "127.0.0.1", prefs.porta_http)
@@ -243,6 +257,9 @@ class MotorProxy:
         self._servidor_socks = self._servidor_http = self._servidor_pac = self._servidor_transparente = None
 
         await self._desligar_transparente()
+        if self.udp is not None:
+            self.udp.parar()
+            self.udp = None
         self._emitir_estado(False, "Motor parado")
 
     # -- mudanças de porta com o motor ligado -----------------------------------------
@@ -296,7 +313,8 @@ class MotorProxy:
                 novas.porta_pac = antigas.porta_pac
 
         campos_transparente = ("modo_transparente_ativo", "porta_transparente", "dns_pelo_proxy",
-                               "dns_excecoes", "dns_servidores", "porta_dns", "prevenir_vazamento")
+                               "dns_excecoes", "dns_servidores", "porta_dns", "prevenir_vazamento",
+                               "udp_pelas_regras")
         transparente_mudou = (
             novas.modo_transparente_ativo != antigas.modo_transparente_ativo
             or (novas.modo_transparente_ativo
@@ -354,6 +372,8 @@ class MotorProxy:
         try:
             if prefs.dns_ativo:
                 await self._ligar_dns(prefs)
+            if prefs.udp_pelas_regras:
+                backend.ao_receber_udp = self._udp_capturado
             ok, mensagem = await asyncio.to_thread(backend.iniciar)
             if not ok:
                 raise RuntimeError(mensagem)
@@ -568,9 +588,13 @@ class MotorProxy:
         inicio = time.monotonic()
         origem = escritor.get_extra_info("peername") or ("", 0)
         try:
-            pedido = await socks5.negociar_servidor(leitor, escritor)
+            pedido = await socks5.negociar_servidor(
+                leitor, escritor, comandos=(socks5.CMD_CONNECT, socks5.CMD_UDP_ASSOCIATE))
         except Exception:
             escritor.close()
+            return
+        if pedido.cmd == socks5.CMD_UDP_ASSOCIATE:
+            await self._associar_udp(leitor, escritor, origem)
             return
         pedido.host = self._nome_do_ip_falso(pedido.host) or pedido.host
 
@@ -688,6 +712,114 @@ class MotorProxy:
             self._contar(len(prefixo), enviado=True, via_proxy=resultado.tipo_acao == "proxy")
         await self._tunelar(leitor, escritor, leitor_destino, escritor_destino, resultado, rota, entrada, inicio,
                             ja_enviados=len(prefixo))
+
+    # -- UDP --------------------------------------------------------------------------
+
+    async def _associar_udp(self, leitor: asyncio.StreamReader, escritor: asyncio.StreamWriter,
+                            origem: tuple) -> None:
+        """UDP ASSOCIATE: abre um relay UDP local que vive enquanto a conexão TCP estiver aberta."""
+        local = escritor.get_extra_info("sockname") or ("127.0.0.1", 0)
+        proc = await asyncio.to_thread(processos.processo_da_conexao, origem[0], origem[1],
+                                       self.configuracao.preferencias.porta_socks)
+        associacao = _AssociacaoSocks(proc)
+        gerenciador = self.udp
+        cliente: list[tuple] = []  # endereço UDP do programa, fixado no primeiro datagrama
+
+        def receber(dados: bytes, endereco: tuple) -> None:
+            if endereco[0] != origem[0] or gerenciador is None:
+                return  # só o programa que abriu a associação pode usá-la
+            if not cliente:
+                cliente.append(endereco)
+            lido = udp.ler_cabecalho_socks(dados)
+            if lido is None:
+                return
+            host, porta, carga = lido
+            nome_falso = self._nome_do_ip_falso(host)
+            if nome_falso == "":
+                return
+            host_original = host
+            host = nome_falso or host
+
+            def responder(resposta: bytes, h=host_original, p=porta) -> None:
+                transporte.sendto(udp.montar_cabecalho_socks(h, p) + resposta, cliente[0])
+
+            self._em_segundo_plano(gerenciador.datagrama(associacao, host, porta, carga, responder))
+
+        try:
+            transporte, _ = await asyncio.get_running_loop().create_datagram_endpoint(
+                lambda: udp.ProtocoloDatagramas(receber), local_addr=(local[0], 0))
+        except OSError:
+            await socks5.responder_cliente(escritor, socks5.REP_GENERAL_FAILURE)
+            escritor.close()
+            return
+        vinculo = transporte.get_extra_info("sockname")
+        try:
+            await socks5.responder_cliente(escritor, socks5.REP_SUCCESS, vinculo[0], vinculo[1])
+            self._escritores_ativos.add(escritor)
+            while await leitor.read(4096):
+                pass  # a associação termina quando o programa fecha a conexão TCP
+        except Exception:
+            pass
+        finally:
+            self._escritores_ativos.discard(escritor)
+            transporte.close()
+            escritor.close()
+            if gerenciador is not None:
+                gerenciador.fechar_cliente(associacao)
+
+    def _udp_capturado(self, origem: tuple[str, int], destino: tuple[str, int], dados: bytes,
+                       responder: udp.Responder) -> None:
+        """Chamado pela thread do backend transparente para cada datagrama capturado."""
+        loop = self._loop
+        if loop is None or not loop.is_running():
+            return
+        loop.call_soon_threadsafe(self._encaminhar_udp_capturado, origem, destino, dados, responder)
+
+    def _encaminhar_udp_capturado(self, origem, destino, dados, responder) -> None:
+        if self.udp is None:
+            return
+        host, porta = destino
+        nome_falso = self._nome_do_ip_falso(host)
+        if nome_falso == "":
+            return
+        self._em_segundo_plano(self.udp.datagrama(("transparente", origem, destino), nome_falso or host, porta,
+                                                  dados, responder))
+
+    async def _decidir_udp(self, cliente, host: str, porta: int) -> udp.Decisao:
+        """Regras para um fluxo UDP novo; registra o fluxo no log como uma conexão."""
+        prefs = self.configuracao.preferencias
+        if isinstance(cliente, _AssociacaoSocks):
+            proc, protocolo = cliente.proc, "socks5-udp"
+        else:
+            proc = await asyncio.to_thread(processos.processo_udp, cliente[1][1])
+            protocolo = "udp"
+        ip_literal = _ip_literal(host)
+        resultado = self.conjunto_regras.avaliar(proc.nome, proc.caminho, host, ip_literal,
+                                                 acao_padrao=prefs.acao_padrao, porta=porta)
+        resultado = self._evitar_loop(resultado, host, porta)
+        if resultado.tipo_acao == "direct" and prefs.prevenir_vazamento and protocolo == "udp":
+            # Na prevenção de vazamento, UDP só sai pelo proxy (WebRTC revelaria o IP real).
+            resultado = Resultado(tipo_acao="block", nome_proxy=None, regra=None,
+                                  motivo="prevenção de vazamento")
+        rota = self._resolver_rota(resultado) if resultado.tipo_acao == "proxy" else None
+
+        entrada = self.registro.adicionar(EntradaLog(
+            pid=proc.pid, nome_processo=proc.nome, caminho_processo=proc.caminho, protocolo=protocolo,
+            host_destino=host, ip_destino=ip_literal or "", porta_destino=porta,
+            regra_aplicada=self._rotulo_regra(resultado), acao=resultado.tipo_acao,
+            proxy_usado=rota.nome if rota else "",
+        ))
+        if resultado.tipo_acao == "block":
+            self._finalizar_bloqueada(entrada, time.monotonic(), resultado)
+            return udp.Decisao(acao="block")
+        self._inicio_udp[entrada.id] = time.monotonic()
+        return udp.Decisao(acao=resultado.tipo_acao, rota=rota, id_entrada=entrada.id)
+
+    def _finalizar_udp(self, id_entrada: str, mudancas: dict) -> None:
+        inicio = self._inicio_udp.pop(id_entrada, None)
+        if inicio is not None:
+            mudancas["duracao_ms"] = int((time.monotonic() - inicio) * 1000)
+        self.registro.atualizar(id_entrada, **mudancas)
 
     # -- utilidades -------------------------------------------------------------------
 

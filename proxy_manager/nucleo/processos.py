@@ -48,6 +48,19 @@ def processo_da_conexao(ip_origem: str, porta_origem: int, porta_escuta: int,
     return DESCONHECIDO
 
 
+def processo_udp(porta_origem: int) -> InfoProcesso:
+    """Processo dono do socket UDP local `porta_origem` (UDP não tem conexão: só a porta)."""
+    try:
+        conexoes = psutil.net_connections(kind="udp")
+    except (psutil.AccessDenied, PermissionError):
+        return DESCONHECIDO
+    pid_proprio = os.getpid()
+    for c in conexoes:
+        if c.laddr and c.laddr.port == porta_origem and c.pid and c.pid != pid_proprio:
+            return _resolver_processo(c.pid)
+    return DESCONHECIDO
+
+
 def _mesmo_ip(a: str, b: str) -> bool:
     # Sockets IPv6 dual-stack mostram destinos IPv4 como "::ffff:1.2.3.4".
     return a.removeprefix("::ffff:") == b.removeprefix("::ffff:")

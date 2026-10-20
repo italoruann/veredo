@@ -149,3 +149,25 @@ def test_prevencao_de_vazamento_rejeita_todo_udp():
     rejeitar = [c for c in comandos if "reject" in c]
     assert rejeitar == [["nft", "add", "rule", "inet", mod.NOME_TABELA, "block_unsupported",
                          "meta", "l4proto", "udp", "reject"]]
+
+
+def test_udp_pelas_regras_marca_e_desvia_com_tproxy():
+    comandos = ModoTransparenteLinux(58095, porta_dns=58053, bloquear_todo_udp=True,
+                                     capturar_udp=True).comandos("1000")
+    # com UDP pelas regras nada de UDP é rejeitado: as regras decidem
+    assert not [c for c in comandos if "reject" in c]
+    marca = [c for c in comandos if "udp_marca" in c and c[2] == "rule"]
+    assert marca[0][-3:] == ["skuid", "1000", "return"]  # o próprio Veredo nunca é desviado
+    assert marca[-1][-3:] == ["mark", "set", mod.MARCA_UDP]
+    tproxy = [c for c in comandos if "tproxy" in c]
+    assert [c[-1] for c in tproxy] == ["127.0.0.1:58095", "[::1]:58095"]
+    rotas = [c for c in comandos if c[0] == "ip"]
+    assert ["ip", "-4", "rule", "add", "fwmark", mod.MARCA_UDP, "lookup", mod.TABELA_ROTAS] in rotas
+
+
+def test_destino_original_do_datagrama_ipv4_e_ipv6():
+    ipv4 = struct.pack("!HH4s8x", socket.AF_INET, 5353, socket.inet_aton("8.8.4.4"))
+    assert mod._ler_destino_original([(mod._SOL_IP, mod._IP_RECVORIGDSTADDR, ipv4)]) == ("8.8.4.4", 5353)
+    ipv6 = struct.pack("!HHI16sI", socket.AF_INET6, 3478, 0, socket.inet_pton(socket.AF_INET6, "2001:db8::9"), 0)
+    assert mod._ler_destino_original([(mod._SOL_IPV6, mod._IPV6_RECVORIGDSTADDR, ipv6)]) == ("2001:db8::9", 3478)
+    assert mod._ler_destino_original([]) is None

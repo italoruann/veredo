@@ -4,13 +4,18 @@ O WinDivert (via pydivert) captura os pacotes TCP de saída e os reescreve para 
 transparente local, guardando o destino original pela porta de origem. Com o DNS pelo proxy,
 as consultas UDP à porta 53 são reescritas da mesma forma para o servidor DNS local. QUIC (UDP
 443) é descartado para que os navegadores usem TCP; na prevenção de vazamento, todo UDP de saída.
+Com "UDP pelas regras", cada datagrama de saída é entregue ao motor (`ao_receber_udp`) e as
+respostas voltam injetadas como pacotes de entrada.
 
 Exige administrador e o pacote pydivert; nada disso é verificado antes de iniciar()."""
 from __future__ import annotations
 
+import ipaddress
 import platform
+import socket
+import struct
 import threading
-from typing import Optional
+from typing import Callable, Optional
 
 from .. import rede
 
@@ -29,12 +34,37 @@ def _loopback(endereco: str) -> str:
     return "::1" if ":" in endereco else "127.0.0.1"
 
 
+def _roteavel(endereco: str) -> bool:
+    """Multicast e broadcast (mDNS, SSDP, DHCP) ficam na rede local, fora das regras."""
+    try:
+        ip = ipaddress.ip_address(endereco)
+    except ValueError:
+        return False
+    return not (ip.is_multicast or endereco == "255.255.255.255")
+
+
+def montar_pacote_udp(origem: tuple[str, int], destino: tuple[str, int], dados: bytes) -> bytes:
+    """Pacote IP+UDP cru; os checksums são calculados pelo WinDivert ao enviar."""
+    udp = struct.pack("!HHHH", origem[1], destino[1], 8 + len(dados), 0) + dados
+    if ":" in origem[0]:
+        return (struct.pack("!IHBB", 6 << 28, len(udp), 17, 64) +
+                socket.inet_pton(socket.AF_INET6, origem[0]) + socket.inet_pton(socket.AF_INET6, destino[0]) + udp)
+    return struct.pack("!BBHHHBBH4s4s", 0x45, 0, 20 + len(udp), 0, 0, 64, 17, 0,
+                       socket.inet_aton(origem[0]), socket.inet_aton(destino[0])) + udp
+
+
+# (origem, destino, dados, responder): chamado na thread de captura.
+AoReceberUdp = Callable[[tuple[str, int], tuple[str, int], bytes, Callable[[bytes], None]], None]
+
+
 class ModoTransparenteWindows:
     def __init__(self, porta_transparente: int, porta_dns: Optional[int] = None,
-                 bloquear_todo_udp: bool = False):
+                 bloquear_todo_udp: bool = False, capturar_udp: bool = False):
         self.porta_transparente = porta_transparente
         self.porta_dns = porta_dns
         self.bloquear_todo_udp = bloquear_todo_udp
+        self.capturar_udp = capturar_udp
+        self.ao_receber_udp: Optional[AoReceberUdp] = None
         self._thread: Optional[threading.Thread] = None
         self._evento_parar = threading.Event()
         self._handle = None
@@ -50,7 +80,7 @@ class ModoTransparenteWindows:
             f"(loopback and tcp.SrcPort == {self.porta_transparente})"
             f"))"
         )
-        if self.bloquear_todo_udp:
+        if self.bloquear_todo_udp or self.capturar_udp:
             udp_saida = "outbound and !loopback"
         else:
             portas = ["udp.DstPort == 443"] + (["udp.DstPort == 53"] if self.porta_dns else [])
@@ -178,4 +208,26 @@ class ModoTransparenteWindows:
             pacote.dst_addr = _loopback(pacote.dst_addr)
             udp.dst_port = self.porta_dns
             return True
+        if self.capturar_udp:
+            if not _roteavel(pacote.dst_addr):
+                return False
+            if self.ao_receber_udp is not None:
+                origem = (pacote.src_addr, udp.src_port)
+                destino = (pacote.dst_addr, udp.dst_port)
+                interface = getattr(pacote, "interface", None)
+                self.ao_receber_udp(origem, destino, bytes(pacote.payload or b""),
+                                    lambda dados: self.injetar_udp(destino, origem, dados, interface))
         return None
+
+    def injetar_udp(self, origem: tuple[str, int], destino: tuple[str, int], dados: bytes, interface) -> None:
+        """Entrega ao programa uma resposta como se tivesse vindo de `origem` pela rede."""
+        handle = self._handle
+        if handle is None:
+            return
+        import pydivert
+
+        pacote = pydivert.Packet(montar_pacote_udp(origem, destino, dados), interface, pydivert.Direction.INBOUND)
+        try:
+            handle.send(pacote, recalculate_checksum=True)
+        except OSError:
+            pass
