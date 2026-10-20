@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import asyncio
 
-from . import proxy_http, socks5
+from . import cliente_proxy
 from .configuracao import PerfilProxy
 
 _HOST_VERIFICACAO = "ip-api.com"
@@ -15,10 +15,9 @@ _CAMINHO_VERIFICACAO = "/line/?fields=query"
 
 async def consultar_ip_saida(perfil: PerfilProxy, timeout: float = 8.0) -> str | None:
     """Devolve o IP de saída ou None se a consulta falhar. Nunca levanta exceção."""
-    conectar = socks5.conectar_via_socks5 if perfil.type == "socks5" else proxy_http.conectar_via_http
     try:
-        leitor, escritor = await conectar(perfil.host, perfil.port, _HOST_VERIFICACAO, _PORTA_VERIFICACAO,
-                                          perfil.usuario, perfil.senha, timeout=timeout)
+        leitor, escritor = await cliente_proxy.abrir_tunel([perfil], _HOST_VERIFICACAO, _PORTA_VERIFICACAO,
+                                                           timeout=timeout)
     except Exception:
         return None
 

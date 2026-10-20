@@ -269,7 +269,9 @@ class PaginaRegras(QWidget):
         combo.addItem("Bloquear", ("block", None))
         for perfil in self.ctx.configuracao.proxies:
             combo.addItem(f"Proxy: {perfil.nome}", ("proxy", perfil.nome))
-        desejado = (tipo_acao, nome_proxy if tipo_acao == "proxy" else None)
+        for cadeia in self.ctx.configuracao.cadeias:
+            combo.addItem(f"Cadeia: {cadeia.nome}", ("chain", cadeia.nome))
+        desejado = (tipo_acao, nome_proxy if tipo_acao in ("proxy", "chain") else None)
         for i in range(combo.count()):
             if combo.itemData(i) == desejado:
                 combo.setCurrentIndex(i)
@@ -311,9 +313,12 @@ class PaginaRegras(QWidget):
         self.tabela.setRowCount(0)
         for regra in conjunto_regras.regras:
             linha = self.tabela.rowCount()
+            if regra.nome_cadeia:
+                tipo_acao, nome = "chain", regra.nome_cadeia
+            else:
+                tipo_acao, nome = regra.tipo_acao, regra.nome_proxy
             self._inserir_linha(linha, aplicativos=", ".join(regra.aplicativos), alvo=regra.alvo_completo,
-                                tipo_acao=regra.tipo_acao, nome_proxy=regra.nome_proxy,
-                                ativo=regra.ativo)
+                                tipo_acao=tipo_acao, nome_proxy=nome, ativo=regra.ativo)
 
     def _regras_da_tabela(self) -> ConjuntoRegras:
         regras: list[Regra] = []
@@ -324,8 +329,8 @@ class PaginaRegras(QWidget):
                 continue
             aplicativos = [a.strip() for a in dados["apps"].split(",") if a.strip()]
             tipo, nome_proxy = dados["action_kind"], dados["proxy_name"]
-            if tipo == "proxy" and nome_proxy:
-                acao = f"proxy:{nome_proxy}"
+            if tipo in ("proxy", "chain") and nome_proxy:
+                acao = f"{tipo}:{nome_proxy}"
             else:
                 acao = tipo
             alvo, portas = dividir_alvo(alvo)
@@ -389,7 +394,7 @@ class PaginaRegras(QWidget):
             "Sintaxe: <code>apps: proc1.exe, proc2</code> define o escopo das linhas seguintes "
             "(<code>apps: *</code> volta a valer para todos); várias linhas <code>apps:</code> "
             "seguidas somam os apps. Cada regra é "
-            "<code>padrao.dominio.com [+direct|+block|+proxy:nome]</code>; sem sufixo, "
+            "<code>padrao.dominio.com [+direct|+block|+proxy:nome|+chain:nome]</code>; sem sufixo, "
             "usa o proxy padrão. Para limitar a portas, use <code>alvo:443</code>, "
             "<code>*:80,8000-8100</code> ou <code>[::1]:443</code> (sem espaços). "
             "Prefixe com <code>!</code> para desabilitar uma regra sem apagá-la."

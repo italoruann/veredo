@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QSizePolicy, QSystemTrayIcon, QTableView, QTabWidget, QToolBar, QToolButton, QVBoxLayout, QWidget,
 )
 
+from ..nucleo import arquivo_perfil
 from ..nucleo.configuracao import NOME_EXIBICAO
 from .contexto import Contexto
 from .icone import desenhar_icone
@@ -23,16 +24,18 @@ from .modelo_conexoes import (
 )
 from .paginas.proxies import PaginaProxies
 from .paginas.regras import PaginaRegras
+from .paginas.cadeias import PaginaCadeias
 from .paginas.configuracoes import PaginaConfiguracoes
 from .tema import PALETA
 from .componentes.icones import icone_linha
+from ..nucleo.regras import ConjuntoRegras
 from .componentes.visualizador_log import NIVEL_ERROS, NIVEL_NORMAL, NIVEL_DETALHADO, VisualizadorLog
 from .componentes.paineis import (
     TituloPainel, ContadoresSessao, VisaoEstatisticas, GraficoTrafego, formatar_taxa, corpo_painel, barra_painel,
 )
 
-# Diálogos do menu Perfil, na ordem dos atalhos Ctrl+1..Ctrl+3.
-DIALOGOS_PERFIL = ["Servidores proxy", "Regras de proxificação", "Configurações"]
+# Diálogos do menu Perfil, na ordem dos atalhos Ctrl+1..Ctrl+4.
+DIALOGOS_PERFIL = ["Servidores proxy", "Regras de proxificação", "Configurações", "Cadeias de proxy"]
 # Intervalo de atualização do gráfico de tráfego (menu do painel Tráfego), em ms.
 TAXAS_ATUALIZACAO = {"fast": 500, "normal": 1000, "slow": 2000}
 # Larguras iniciais das colunas do painel Conexões.
@@ -85,10 +88,12 @@ class JanelaPrincipal(QMainWindow):
         self.pagina_proxies = PaginaProxies(ctx)
         self.pagina_regras = PaginaRegras(ctx)
         self.pagina_configuracoes = PaginaConfiguracoes(ctx)
+        self.pagina_cadeias = PaginaCadeias(ctx)
         self.dialogos = [
             DialogoGestao(DIALOGOS_PERFIL[0], self.pagina_proxies, QSize(760, 560), self),
             DialogoGestao(DIALOGOS_PERFIL[1], self.pagina_regras, QSize(900, 680), self),
             DialogoGestao(DIALOGOS_PERFIL[2], self.pagina_configuracoes, QSize(640, 700), self, rolagem=False),
+            DialogoGestao(DIALOGOS_PERFIL[3], self.pagina_cadeias, QSize(820, 660), self),
         ]
 
         self.log = VisualizadorLog()
@@ -173,10 +178,18 @@ class JanelaPrincipal(QMainWindow):
             (DIALOGOS_PERFIL[0], "Configurar os servidores proxy", "server"),
             (DIALOGOS_PERFIL[1], "Editar as regras de proxificação", "rules"),
             (DIALOGOS_PERFIL[2], "Portas, integração com o sistema, logs e modo transparente", "settings"),
+            (DIALOGOS_PERFIL[3], "Juntar proxies em sequência, redundância ou balanceamento", "chain"),
         )):
             self.acoes_perfil.append(self._acao(
                 f"{titulo}...", lambda _c=False, i=i: self.abrir_dialogo_perfil(i), f"Ctrl+{i + 1}", dica,
                 icone_linha(nome_icone)))
+        self.acao_importar_perfil = self._acao("&Importar perfil...", self.importar_perfil,
+                                               dica="Carrega proxies, cadeias e regras de um arquivo "
+                                                    "do Veredo (.json) ou do Proxifier (.ppx)",
+                                               icone=icone_linha("import"))
+        self.acao_exportar_perfil = self._acao("E&xportar perfil...", self.exportar_perfil,
+                                               dica="Salva proxies, cadeias e regras num arquivo",
+                                               icone=icone_linha("export"))
         self.acao_pasta_dados = self._acao("Abrir &pasta de dados...",
                                            self.pagina_configuracoes._abrir_pasta_dados,
                                            dica="Abre a pasta com config.json e o histórico")
@@ -215,6 +228,9 @@ class JanelaPrincipal(QMainWindow):
         self.barra_menus.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Preferred)
         menu_arquivo = self.barra_menus.addMenu("&Arquivo")
         menu_arquivo.addAction(self.acao_motor)
+        menu_arquivo.addSeparator()
+        menu_arquivo.addAction(self.acao_importar_perfil)
+        menu_arquivo.addAction(self.acao_exportar_perfil)
         menu_arquivo.addSeparator()
         menu_arquivo.addAction(self.acao_pasta_dados)
         menu_arquivo.addSeparator()
@@ -540,6 +556,55 @@ class JanelaPrincipal(QMainWindow):
             self.ctx.motor.parar()
         else:
             self.ctx.motor.iniciar()
+
+    def importar_perfil(self) -> None:
+        caminho, _ = QFileDialog.getOpenFileName(
+            self, "Importar perfil", "",
+            "Perfis (*.json *.ppx);;Perfil do Veredo (*.json);;Perfil do Proxifier (*.ppx)")
+        if not caminho:
+            return
+        try:
+            novo = arquivo_perfil.importar(caminho)
+        except arquivo_perfil.ErroPerfil as exc:
+            QMessageBox.warning(self, "Importar perfil", f"Não foi possível importar: {exc}")
+            return
+        qtd_regras = len(ConjuntoRegras.interpretar(novo.texto_regras).regras)
+        resposta = QMessageBox.question(
+            self, "Importar perfil",
+            f"O arquivo tem {len(novo.proxies)} proxy(s), {len(novo.cadeias)} cadeia(s) e {qtd_regras} "
+            "regra(s). Eles vão substituir os proxies, cadeias, aplicativos e regras atuais "
+            "(as configurações não mudam). Exporte o perfil atual antes, se quiser guardá-lo.\n\n"
+            "Continuar?")
+        if resposta != QMessageBox.StandardButton.Yes:
+            return
+        cfg = self.ctx.configuracao
+        cfg.proxies, cfg.cadeias = novo.proxies, novo.cadeias
+        cfg.aplicativos, cfg.texto_regras = novo.aplicativos, novo.texto_regras
+        cfg.garantir_padrao_unico()
+        self.ctx.aplicar_mudancas()
+        self.pagina_proxies._recarregar_lista()
+        self.pagina_cadeias._recarregar_lista()
+        self.pagina_regras._carregar_da_configuracao()
+        self.pagina_regras._recarregar_tabela_apps()
+        self.log.mensagem(f"Perfil importado de {caminho}")
+
+    def exportar_perfil(self) -> None:
+        caminho, _ = QFileDialog.getSaveFileName(self, "Exportar perfil", "veredo-perfil.json",
+                                                 "Perfil do Veredo (*.json)")
+        if not caminho:
+            return
+        incluir_senhas = QMessageBox.question(
+            self, "Exportar perfil",
+            "Incluir as senhas dos proxies no arquivo?\n\nElas ficam em texto puro: só inclua se o "
+            "arquivo for guardado em lugar seguro.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes
+        try:
+            arquivo_perfil.exportar(self.ctx.configuracao, caminho, incluir_senhas)
+        except OSError as exc:
+            QMessageBox.warning(self, "Exportar perfil", f"Não foi possível salvar: {exc}")
+            return
+        self.log.mensagem(f"Perfil exportado para {caminho}")
 
     def abrir_dialogo_perfil(self, indice: int) -> None:
         dialogo = self.dialogos[indice]
