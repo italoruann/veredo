@@ -9,9 +9,9 @@ import threading
 import time
 from typing import Callable, Optional, Protocol
 
-from . import cliente_proxy, processos, proxy_http, rede, socks5, verificacao_ip
+from . import cliente_proxy, dns, processos, proxy_http, rede, socks5, verificacao_ip
 from .cliente_proxy import Rota
-from .configuracao import Configuracao, PerfilProxy
+from .configuracao import Configuracao, PerfilProxy, Preferencias
 from .integracao_sistema import gerar_script_pac, iniciar_servidor_pac
 from .registro import EntradaLog, Registro
 from .regras import ConjuntoRegras, Resultado
@@ -31,15 +31,25 @@ class BackendTransparente(Protocol):
     def resolver_destino(self, escritor: asyncio.StreamWriter, porta_origem: int) -> Optional[tuple[str, int]]: ...
 
 
-def _criar_backend_transparente(porta: int) -> Optional[BackendTransparente]:
+def _criar_backend_transparente(prefs: Preferencias) -> Optional[BackendTransparente]:
+    argumentos = (prefs.porta_transparente, prefs.porta_dns if prefs.dns_ativo else None,
+                  prefs.prevenir_vazamento)
     sistema = platform.system()
     if sistema == "Linux":
         from .transparente.linux_nftables import ModoTransparenteLinux
-        return ModoTransparenteLinux(porta)
+        return ModoTransparenteLinux(*argumentos)
     if sistema == "Windows":
         from .transparente.windows_windivert import ModoTransparenteWindows
-        return ModoTransparenteWindows(porta)
+        return ModoTransparenteWindows(*argumentos)
     return None
+
+
+async def _abrir_servidor_local(tratador, porta: int) -> asyncio.AbstractServer:
+    """Escuta em 127.0.0.1 e, se a máquina tiver IPv6, também em ::1."""
+    try:
+        return await asyncio.start_server(tratador, ["127.0.0.1", "::1"], porta)
+    except OSError:
+        return await asyncio.start_server(tratador, "127.0.0.1", porta)
 
 
 def _ip_literal(host: str) -> Optional[str]:
@@ -72,6 +82,9 @@ class MotorProxy:
         self._servidor_pac: Optional[asyncio.AbstractServer] = None
         self._servidor_transparente: Optional[asyncio.AbstractServer] = None
         self.backend_transparente: Optional[BackendTransparente] = None
+        self.servidor_dns: Optional[dns.ServidorDns] = None
+        # Mantida entre reinícios do motor: programas guardam os IPs falsos em cache.
+        self.tabela_dns = dns.TabelaIpsFalsos()
         self._escritores_ativos: set[asyncio.StreamWriter] = set()
         self._tarefas_fundo: set[asyncio.Task] = set()
 
@@ -187,17 +200,11 @@ class MotorProxy:
             raise
 
         if prefs.modo_transparente_ativo:
-            backend = _criar_backend_transparente(prefs.porta_transparente)
-            if backend is None:
-                self._emitir_estado(False, "Modo transparente não é suportado nesta plataforma.")
-                raise RuntimeError("modo transparente não suportado nesta plataforma")
-            ok, mensagem = backend.iniciar()
-            if not ok:
-                self._emitir_estado(False, f"Falha ao ativar o modo transparente: {mensagem}")
-                raise RuntimeError(mensagem)
-            self._servidor_transparente = await asyncio.start_server(
-                self._atender_transparente, "127.0.0.1", prefs.porta_transparente)
-            self.backend_transparente = backend
+            try:
+                await self._ligar_transparente(prefs)
+            except (OSError, RuntimeError) as exc:
+                self._emitir_estado(False, f"Falha ao ativar o modo transparente: {exc}")
+                raise
 
         self._chaves_perfis = {perfil.id: self._chave_cache_ip(perfil) for perfil in self.configuracao.proxies}
         self._emitir_estado(True, "Motor iniciado")
@@ -235,10 +242,7 @@ class MotorProxy:
                 pass
         self._servidor_socks = self._servidor_http = self._servidor_pac = self._servidor_transparente = None
 
-        if self.backend_transparente is not None:
-            await asyncio.to_thread(self.backend_transparente.parar)
-            self.backend_transparente = None
-
+        await self._desligar_transparente()
         self._emitir_estado(False, "Motor parado")
 
     # -- mudanças de porta com o motor ligado -----------------------------------------
@@ -291,9 +295,12 @@ class MotorProxy:
                 erros.append(f"porta do PAC ({novas.porta_pac}): {exc}")
                 novas.porta_pac = antigas.porta_pac
 
+        campos_transparente = ("modo_transparente_ativo", "porta_transparente", "dns_pelo_proxy",
+                               "dns_excecoes", "dns_servidores", "porta_dns", "prevenir_vazamento")
         transparente_mudou = (
             novas.modo_transparente_ativo != antigas.modo_transparente_ativo
-            or (novas.modo_transparente_ativo and novas.porta_transparente != antigas.porta_transparente)
+            or (novas.modo_transparente_ativo
+                and any(getattr(novas, c) != getattr(antigas, c) for c in campos_transparente))
         )
         if transparente_mudou:
             try:
@@ -301,8 +308,15 @@ class MotorProxy:
                 aplicados.append("modo transparente")
             except (OSError, RuntimeError) as exc:
                 erros.append(f"modo transparente: {exc}")
-                novas.modo_transparente_ativo = antigas.modo_transparente_ativo
-                novas.porta_transparente = antigas.porta_transparente
+                for campo in campos_transparente:
+                    setattr(novas, campo, getattr(antigas, campo))
+                if antigas.modo_transparente_ativo:
+                    # O modo antigo foi desligado na tentativa; volta a ligá-lo.
+                    try:
+                        await self._ligar_transparente(antigas)
+                    except (OSError, RuntimeError) as exc_antigo:
+                        erros.append(f"o modo transparente anterior não voltou: {exc_antigo}")
+                        novas.modo_transparente_ativo = False
 
         self.configuracao = nova_configuracao
         self.conjunto_regras = ConjuntoRegras.interpretar(nova_configuracao.texto_regras)
@@ -325,32 +339,58 @@ class MotorProxy:
         await _fechar_servidor(antigo)
         return novo
 
-    async def _aplicar_modo_transparente(self, prefs) -> None:
-        backend_antigo = self.backend_transparente
-        servidor_antigo = self._servidor_transparente
+    async def _aplicar_modo_transparente(self, prefs: Preferencias) -> None:
+        # O backend antigo precisa sair antes: os dois disputariam as mesmas regras de captura.
+        await self._desligar_transparente()
+        if prefs.modo_transparente_ativo:
+            await self._ligar_transparente(prefs)
 
-        if not prefs.modo_transparente_ativo:
-            await _fechar_servidor(servidor_antigo)
-            self._servidor_transparente = None
-            if backend_antigo is not None:
-                await asyncio.to_thread(backend_antigo.parar)
-                self.backend_transparente = None
-            return
-
-        backend = _criar_backend_transparente(prefs.porta_transparente)
+    async def _ligar_transparente(self, prefs: Preferencias) -> None:
+        """Abre o listener e o DNS local antes de o backend começar a desviar o tráfego."""
+        backend = _criar_backend_transparente(prefs)
         if backend is None:
             raise RuntimeError("modo transparente não é suportado nesta plataforma")
-        ok, mensagem = await asyncio.to_thread(backend.iniciar)
-        if not ok:
-            raise RuntimeError(mensagem)
-        servidor_novo = await asyncio.start_server(
-            self._atender_transparente, "127.0.0.1", prefs.porta_transparente)
-
-        await _fechar_servidor(servidor_antigo)
-        if backend_antigo is not None:
-            await asyncio.to_thread(backend_antigo.parar)
-        self._servidor_transparente = servidor_novo
+        servidor = await _abrir_servidor_local(self._atender_transparente, prefs.porta_transparente)
+        try:
+            if prefs.dns_ativo:
+                await self._ligar_dns(prefs)
+            ok, mensagem = await asyncio.to_thread(backend.iniciar)
+            if not ok:
+                raise RuntimeError(mensagem)
+        except BaseException:
+            await _fechar_servidor(servidor)
+            self._desligar_dns()
+            raise
+        self._servidor_transparente = servidor
         self.backend_transparente = backend
+
+    async def _desligar_transparente(self) -> None:
+        backend, self.backend_transparente = self.backend_transparente, None
+        if backend is not None:
+            await asyncio.to_thread(backend.parar)
+        servidor, self._servidor_transparente = self._servidor_transparente, None
+        try:
+            await _fechar_servidor(servidor)
+        except Exception:
+            pass
+        self._desligar_dns()
+
+    async def _ligar_dns(self, prefs: Preferencias) -> None:
+        servidores = dns.interpretar_excecoes(prefs.dns_servidores) or dns.servidores_dns_sistema()
+        if not servidores:
+            raise RuntimeError("nenhum servidor DNS encontrado no sistema; informe um nas Configurações")
+        real = dns.ResolvedorReal(servidores)
+        servidor = dns.ServidorDns(self.tabela_dns, real, dns.interpretar_excecoes(prefs.dns_excecoes),
+                                   bloquear_outros=prefs.prevenir_vazamento)
+        await servidor.iniciar(prefs.porta_dns)
+        self.servidor_dns = servidor
+        rede.resolvedor = real.resolver
+
+    def _desligar_dns(self) -> None:
+        if self.servidor_dns is not None:
+            self.servidor_dns.parar()
+            self.servidor_dns = None
+            rede.resolvedor = None
 
     def _emitir_estado(self, ativo: bool, mensagem: str) -> None:
         if self.ao_mudar_estado:
@@ -473,11 +513,17 @@ class MotorProxy:
 
     async def _resolver_ip_destino(self, id_entrada: str, host: str) -> None:
         try:
-            infos = await asyncio.wait_for(asyncio.get_running_loop().getaddrinfo(host, None), timeout=2.0)
+            enderecos = await asyncio.wait_for(rede.resolver(host), timeout=2.0)
         except Exception:
             return
-        if infos:
-            self.registro.atualizar(id_entrada, ip_destino=infos[0][4][0])
+        if enderecos:
+            self.registro.atualizar(id_entrada, ip_destino=enderecos[0])
+
+    def _nome_do_ip_falso(self, host: str) -> Optional[str]:
+        """Nome que o DNS local associou a um IP falso; None se `host` não é um IP falso."""
+        if not dns.eh_ip_falso(host):
+            return None
+        return self.tabela_dns.nome_de(host) or ""
 
     async def _atualizar_ip_saida(self, perfil: PerfilProxy, id_entrada: Optional[str] = None,
                                   tinha_valor: bool = False) -> None:
@@ -526,6 +572,7 @@ class MotorProxy:
         except Exception:
             escritor.close()
             return
+        pedido.host = self._nome_do_ip_falso(pedido.host) or pedido.host
 
         resultado, rota, entrada = await self._preparar(
             pedido.host, pedido.port, origem[0], origem[1], self.configuracao.preferencias.porta_socks, "socks5")
@@ -557,6 +604,7 @@ class MotorProxy:
         except Exception:
             escritor.close()
             return
+        host = self._nome_do_ip_falso(host) or host
 
         resultado, rota, entrada = await self._preparar(
             host, porta, origem[0], origem[1], self.configuracao.preferencias.porta_http, "http")
@@ -594,6 +642,13 @@ class MotorProxy:
             escritor.close()
             return
         host, porta = destino
+        nome_falso = self._nome_do_ip_falso(host)
+        if nome_falso == "":
+            # IP falso de antes de o Veredo reiniciar (ou já reaproveitado): não há como saber o nome.
+            escritor.close()
+            return
+        if nome_falso:
+            host = nome_falso  # o proxy recebe o nome; uma conexão direta resolve pelo DNS real
 
         # Lê os primeiros bytes para descobrir o domínio (SNI ou Host); eles são repassados intactos.
         prefixo = b""
@@ -610,7 +665,7 @@ class MotorProxy:
 
         resultado, rota, entrada = await self._preparar(
             host, porta, origem[0], origem[1], self.configuracao.preferencias.porta_transparente,
-            "transparente", host_regras=host_detectado, destino_original=destino)
+            "transparente", host_regras=host_detectado or nome_falso, destino_original=destino)
 
         if resultado.tipo_acao == "block":
             escritor.close()
