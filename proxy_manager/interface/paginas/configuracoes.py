@@ -264,7 +264,28 @@ class PaginaConfiguracoes(QWidget):
         self.caixa_inicio_automatico.setChecked(inicio_automatico.esta_ativo())
         self.caixa_inicio_automatico.toggled.connect(self._ao_alternar_inicio_automatico)
         layout.addWidget(caixa_com_quebra(self.caixa_inicio_automatico))
+
+        self.caixa_aviso_voz = QCheckBox("Avisar por voz quando o IP de saída do proxy mudar")
+        self.caixa_aviso_voz.setChecked(preferencias.aviso_voz_ip_ativo)
+        self.caixa_aviso_voz.toggled.connect(self._ao_alternar_aviso_voz)
+        botao_testar_voz = QPushButton("Testar voz")
+        botao_testar_voz.clicked.connect(self._ao_testar_voz)
+        linha_voz = QHBoxLayout()
+        linha_voz.addWidget(caixa_com_quebra(self.caixa_aviso_voz), 1)
+        linha_voz.addWidget(botao_testar_voz)
+        layout.addLayout(linha_voz)
         return quadro
+
+    def _ao_alternar_aviso_voz(self, marcado: bool) -> None:
+        self.ctx.configuracao.preferencias.aviso_voz_ip_ativo = marcado
+        self.ctx.aplicar_mudancas()
+
+    def _ao_testar_voz(self) -> None:
+        from ..aviso_voz import FRASE_TROCA_IP
+        if not self.ctx.aviso_voz.falar(FRASE_TROCA_IP):
+            QMessageBox.warning(self, "Aviso por voz",
+                                "Nenhuma voz de síntese disponível no sistema. No Linux, instale o "
+                                "speech-dispatcher.")
 
     def _ao_alternar_bandeja(self, marcado: bool) -> None:
         self.ctx.configuracao.preferencias.minimizar_para_bandeja = marcado

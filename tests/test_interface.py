@@ -378,6 +378,25 @@ def test_opcoes_da_pagina_configuracoes(window):
     assert pagina.ctx.configuracao.preferencias.dias_retencao_log == 30
 
 
+def test_aviso_voz_ao_trocar_ip_saida(window, monkeypatch):
+    from proxy_manager.interface.aviso_voz import FRASE_TROCA_IP
+
+    ctx = window.ctx
+    ctx.configuracao.proxies = [PerfilProxy(id="p1", nome="Casa")]
+    falas = []
+    monkeypatch.setattr(ctx.aviso_voz, "falar", lambda texto: falas.append(texto) or True)
+
+    ctx.aviso_voz._ao_mudar_ip_saida("p1", "", "10.0.0.1")  # primeira verificação: não é troca
+    ctx.aviso_voz._ao_mudar_ip_saida("p1", "10.0.0.1", "10.0.0.2")
+    assert falas == [FRASE_TROCA_IP]
+
+    window.abrir_dialogo_perfil(2)
+    window.pagina_configuracoes.caixa_aviso_voz.setChecked(False)
+    assert not ctx.configuracao.preferencias.aviso_voz_ip_ativo
+    ctx.aviso_voz._ao_mudar_ip_saida("p1", "10.0.0.2", "10.0.0.3")
+    assert len(falas) == 1
+
+
 def test_iniciar_e_parar_motor_pelo_menu(window):
     ctx = window.ctx
     ctx.configuracao.preferencias.porta_socks = 58480

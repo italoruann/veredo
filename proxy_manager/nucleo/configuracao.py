@@ -111,6 +111,7 @@ class Preferencias:
     minimizar_para_bandeja: bool = False
     modo_transparente_ativo: bool = False
     porta_transparente: int = 58095
+    aviso_voz_ip_ativo: bool = True
 
     def para_dict(self) -> dict[str, Any]:
         return asdict(self)

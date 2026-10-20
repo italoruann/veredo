@@ -12,6 +12,7 @@ from ..nucleo.configuracao import Configuracao, carregar_configuracao, salvar_co
 from ..nucleo.estado_ip_saida import carregar_ips_saida, salvar_ips_saida
 from ..nucleo.motor import MotorProxy
 from ..nucleo.registro import EntradaLog, Registro
+from .aviso_voz import AvisoVoz
 from .modelo_conexoes import ModeloConexoes
 
 # Os eventos de log são acumulados e entregues em lote; um sinal por conexão travava a interface.
@@ -37,6 +38,7 @@ class Contexto(QObject):
         # id do perfil -> (IP anterior, IP atual), preservado entre execuções.
         self.ips_saida: dict[str, tuple[str, str]] = carregar_ips_saida()
         self.motor.restaurar_ips_saida({id_perfil: atual for id_perfil, (_, atual) in self.ips_saida.items()})
+        self.aviso_voz = AvisoVoz(self)
 
         self._trava_pendentes = threading.Lock()
         self._pendentes_novos: list[EntradaLog] = []
