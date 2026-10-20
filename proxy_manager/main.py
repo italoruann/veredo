@@ -5,6 +5,9 @@ import sys
 
 
 def main() -> None:
+    if _executar_comando_servico(sys.argv[1:]):
+        return
+
     from .dependencias_linux import garantir_bibliotecas_qt
 
     garantir_bibliotecas_qt()  # antes de o Qt carregar o plugin de plataforma
@@ -34,6 +37,21 @@ def main() -> None:
 
     _sair_nos_sinais_de_termino(app, janela.sair)
     sys.exit(app.exec())
+
+
+def _executar_comando_servico(argumentos: list[str]) -> bool:
+    """Modo serviço e instalação dele, sem carregar o Qt. True se tratou a linha de comando."""
+    from .nucleo import servico
+
+    if "--servico" in argumentos:
+        sys.exit(servico.executar_servico())
+    for opcao, acao in (("--instalar-servico", servico.instalar_servico),
+                        ("--remover-servico", servico.remover_servico)):
+        if opcao in argumentos:
+            ok, mensagem = acao()
+            print(mensagem, file=sys.stdout if ok else sys.stderr)
+            sys.exit(0 if ok else 1)
+    return False
 
 
 def _sair_nos_sinais_de_termino(app, sair) -> None:

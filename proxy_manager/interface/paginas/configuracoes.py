@@ -1,7 +1,10 @@
-"""Configurações: portas locais, proxy do sistema, ação padrão, logs e preferências gerais."""
+"""Configurações: portas locais, proxy do sistema, ação padrão, logs, preferências gerais,
+modo transparente e serviço do sistema."""
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, QUrl
+import threading
+
+from PySide6.QtCore import Qt, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QFormLayout, QFrame, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
@@ -9,7 +12,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..contexto import Contexto
-from ...nucleo import inicio_automatico, integracao_sistema
+from ...nucleo import inicio_automatico, integracao_sistema, servico
 from ...nucleo.configuracao import NOME_EXIBICAO, pasta_dados
 from ..componentes.responsivo import caixa_com_quebra
 
@@ -27,6 +30,9 @@ def _cartao(texto_titulo: str) -> tuple[QFrame, QVBoxLayout]:
 
 
 class PaginaConfiguracoes(QWidget):
+    # (instalando, ok, mensagem) vindo da thread que espera o UAC/pkexec
+    _servico_concluido = Signal(bool, bool, str)
+
     def __init__(self, ctx: Contexto, parent: QWidget | None = None):
         super().__init__(parent)
         self.ctx = ctx
@@ -58,6 +64,7 @@ class PaginaConfiguracoes(QWidget):
         raiz.addWidget(self._criar_cartao_logs())
         raiz.addWidget(self._criar_cartao_geral())
         raiz.addWidget(self._criar_cartao_transparente())
+        raiz.addWidget(self._criar_cartao_servico())
         raiz.addStretch(1)
 
     # -- portas -----------------------------------------------------------------
@@ -447,3 +454,70 @@ class PaginaConfiguracoes(QWidget):
             self.ctx.aplicar_mudancas()
             self.rotulo_transparente.setText(
                 "Configurações salvas. Serão aplicadas quando você iniciar o motor no Dashboard.")
+
+    # -- serviço do sistema -------------------------------------------------------
+
+    def _criar_cartao_servico(self) -> QFrame:
+        quadro, layout = _cartao("Serviço do sistema")
+        dica = QLabel(
+            f"Roda o motor como serviço, iniciado com o computador e antes de qualquer login, "
+            f"sem a janela aberta. A janela passa a controlar o serviço e envia a ele a "
+            f"configuração (inclusive as senhas, guardadas num arquivo que só o administrador "
+            f"lê). Fechar o {NOME_EXIBICAO} não para o serviço. Pede permissão de administrador."
+        )
+        dica.setWordWrap(True)
+        dica.setObjectName("DicaCartao")
+        layout.addWidget(dica)
+
+        self.rotulo_servico = QLabel()
+        self.rotulo_servico.setWordWrap(True)
+        layout.addWidget(self.rotulo_servico)
+
+        self.botao_instalar_servico = QPushButton("Instalar serviço")
+        self.botao_instalar_servico.setObjectName("BotaoPrincipal")
+        self.botao_instalar_servico.clicked.connect(lambda: self._executar_servico(True))
+        self.botao_remover_servico = QPushButton("Remover serviço")
+        self.botao_remover_servico.clicked.connect(lambda: self._executar_servico(False))
+        linha = QHBoxLayout()
+        linha.addStretch(1)
+        linha.addWidget(self.botao_remover_servico)
+        linha.addWidget(self.botao_instalar_servico)
+        layout.addLayout(linha)
+
+        self._servico_concluido.connect(self._ao_concluir_servico)
+        self._atualizar_servico()
+        return quadro
+
+    def _atualizar_servico(self, mensagem: str = "") -> None:
+        usando = self.ctx.usando_servico
+        self.botao_instalar_servico.setEnabled(not usando)
+        self.botao_remover_servico.setEnabled(usando)
+        estado = ("Esta janela está controlando o serviço do sistema." if usando
+                  else "O motor roda dentro desta janela.")
+        self.rotulo_servico.setText(f"{mensagem}\n{estado}" if mensagem else estado)
+
+    def _executar_servico(self, instalar: bool) -> None:
+        self.botao_instalar_servico.setEnabled(False)
+        self.botao_remover_servico.setEnabled(False)
+        self.rotulo_servico.setText("Aguardando a permissão de administrador...")
+
+        def trabalho() -> None:
+            ok, mensagem = servico.executar_como_administrador(
+                "--instalar-servico" if instalar else "--remover-servico")
+            if ok and instalar and not servico.esperar_servico():
+                ok, mensagem = False, "O serviço foi instalado mas não respondeu ao canal de controle."
+            self._servico_concluido.emit(instalar, ok, mensagem)
+
+        threading.Thread(target=trabalho, daemon=True).start()
+
+    def _ao_concluir_servico(self, instalar: bool, ok: bool, mensagem: str) -> None:
+        if ok:
+            if instalar:
+                self.ctx.conectar_servico()
+                mensagem = mensagem or "Serviço instalado e em execução."
+            else:
+                self.ctx.desconectar_servico()
+                mensagem = mensagem or "Serviço removido."
+        else:
+            mensagem = f"Falhou: {mensagem}"
+        self._atualizar_servico(mensagem)
