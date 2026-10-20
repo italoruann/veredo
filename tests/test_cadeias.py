@@ -230,3 +230,68 @@ def test_motor_usa_cadeia_da_regra():
                 s.close()
 
     asyncio.run(cenario())
+
+
+def _gerar_certificado(pasta) -> tuple[str, str] | None:
+    import shutil
+    import subprocess
+
+    openssl = shutil.which("openssl")
+    if openssl is None:
+        return None
+    cert, chave = str(pasta / "cert.pem"), str(pasta / "chave.pem")
+    subprocess.run([openssl, "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
+                    "-subj", "/CN=localhost", "-addext", "subjectAltName=DNS:localhost",
+                    "-keyout", chave, "-out", cert], check=True, capture_output=True, timeout=60)
+    return cert, chave
+
+
+def test_proxy_https_no_primeiro_salto_e_dentro_de_cadeia(tmp_path, monkeypatch):
+    import ssl
+
+    import pytest
+
+    gerado = _gerar_certificado(tmp_path)
+    if gerado is None:
+        pytest.skip("openssl não encontrado")
+    cert, chave = gerado
+    contexto_servidor = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+    contexto_servidor.load_cert_chain(cert, chave)
+    monkeypatch.setattr(cliente_proxy, "_contexto_tls", lambda: ssl.create_default_context(cafile=cert))
+
+    async def cenario():
+        saltos = []
+
+        async def handle(leitor, escritor):
+            try:
+                cabecalho = await ler_cabecalho_requisicao(leitor)
+                host, porta = extrair_destino(cabecalho)
+                saltos.append(("https", host, porta))
+                leitor_d, escritor_d = await asyncio.open_connection(host, porta)
+            except Exception:
+                escritor.close()
+                return
+            escritor.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+            await escritor.drain()
+            await asyncio.gather(_repassar(leitor, escritor_d), _repassar(leitor_d, escritor))
+
+        servidor_tls = await asyncio.start_server(handle, "127.0.0.1", 0, ssl=contexto_servidor)
+        porta_tls = servidor_tls.sockets[0].getsockname()[1]
+        s5, p5 = await _proxy_socks5(saltos)
+        eco, porta_eco = await _eco()
+        try:
+            https = PerfilProxy(nome="tls", type="https", host="localhost", port=porta_tls)
+            leitor, escritor = await cliente_proxy.abrir_tunel([https], "127.0.0.1", porta_eco)
+            assert await _conversar(leitor, escritor) == b"ping"
+
+            # SOCKS5 -> HTTPS: o TLS começa no meio do túnel (start_tls)
+            socks = PerfilProxy(nome="s5", type="socks5", host="127.0.0.1", port=p5)
+            leitor, escritor = await cliente_proxy.abrir_tunel([socks, https], "127.0.0.1", porta_eco)
+            assert await _conversar(leitor, escritor) == b"ping"
+            assert saltos == [("https", "127.0.0.1", porta_eco), ("socks5", "localhost", porta_tls),
+                              ("https", "127.0.0.1", porta_eco)]
+        finally:
+            for s in (servidor_tls, s5, eco):
+                s.close()
+
+    asyncio.run(cenario())

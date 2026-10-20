@@ -277,7 +277,7 @@ class ResolvedorReal:
                 sock.bind(("::" if familia == socket.AF_INET6 else "0.0.0.0", 0))
                 porta_local = sock.getsockname()[1]
                 rede.reservar_porta(porta_local)
-                await loop.sock_sendto(sock, consulta, (servidor, porta))
+                await loop.sock_sendto(sock, consulta, rede.endereco_socket(servidor, porta))
                 fim = loop.time() + self.timeout
                 while True:
                     dados, _origem = await asyncio.wait_for(loop.sock_recvfrom(sock, 4096),
