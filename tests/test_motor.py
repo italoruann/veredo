@@ -203,3 +203,41 @@ def test_parar_e_rapido_apos_conexao_encerrada():
         assert not motor.em_execucao()
 
     asyncio.run(cenario())
+
+
+def test_trocar_porta_do_perfil_com_motor_ligado(monkeypatch):
+    """Editar o endereço do perfil encerra os túneis antigos e consulta o novo IP de saída na hora."""
+    from proxy_manager.nucleo import verificacao_ip
+
+    async def ip_falso(perfil, timeout=8.0):
+        return f"ip-{perfil.port}"
+    monkeypatch.setattr(verificacao_ip, "consultar_ip_saida", ip_falso)
+
+    async def cenario():
+        servidor_proxy_1, porta_1 = await _iniciar_proxy_socks5_falso()
+        servidor_proxy_2, porta_2 = await _iniciar_proxy_socks5_falso()
+        servidor_eco, porta_eco = await _iniciar_proxy_socks5_falso()  # destino que mantém a conexão aberta
+        perfil = PerfilProxy(nome="rotativo", type="socks5", host="127.0.0.1", port=porta_1, padrao=True)
+        motor, _registro = _criar_motor("127.0.0.1\n", proxies=[perfil])
+        mudancas = []
+        motor.ao_mudar_ip_saida = lambda *args: mudancas.append(args)
+        motor.iniciar()
+        try:
+            # Túnel longo pela porta antiga (como um HTTPS mantido aberto pelo navegador).
+            leitor, escritor = await conectar_via_socks5("127.0.0.1", PORTA_SOCKS, "127.0.0.1", porta_eco)
+            await asyncio.sleep(0.3)
+            assert mudancas == [(perfil.id, "", f"ip-{porta_1}")]
+
+            perfil.port = porta_2
+            motor.atualizar_configuracao(motor.configuracao)
+            assert await asyncio.wait_for(leitor.read(-1), timeout=3) == b""  # túnel antigo encerrado
+            await asyncio.sleep(0.3)
+            # Sem nenhuma conexão nova, o IP da porta nova já foi verificado.
+            assert mudancas[-1] == (perfil.id, f"ip-{porta_1}", f"ip-{porta_2}")
+            escritor.close()
+        finally:
+            motor.parar()
+            for servidor in (servidor_proxy_1, servidor_proxy_2, servidor_eco):
+                servidor.close()
+
+    asyncio.run(cenario())

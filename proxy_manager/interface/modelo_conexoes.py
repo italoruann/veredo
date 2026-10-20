@@ -1,7 +1,7 @@
 """Modelo da tabela do painel Conexões.
 
-Mostra as conexões via proxy abertas e mantém as recém-encerradas por alguns segundos, em
-cinza. Conexões diretas e bloqueadas aparecem só no log de texto."""
+Mostra as conexões abertas e mantém as recém-encerradas por alguns segundos, em cinza. O filtro
+escolhe quais aparecem (por padrão, só as que passam pelo proxy)."""
 from __future__ import annotations
 
 import time
@@ -22,6 +22,14 @@ COL_APP, COL_DESTINO, COL_ESTADO, COL_REGRA, COL_ENVIADO, COL_RECEBIDO = range(l
 SEGUNDOS_APOS_FECHAR = 3.0
 
 ROTULOS_ACAO = {"direct": "Direto", "proxy": "Via proxy", "block": "Bloqueado"}
+# Filtro de conexões exibidas -> ações incluídas. Vale para o painel Conexões e para o log.
+FILTROS_CONEXOES = {
+    "todas": frozenset({"proxy", "direct", "block"}),
+    "proxy": frozenset({"proxy"}),
+    "direct": frozenset({"direct"}),
+    "block": frozenset({"block"}),
+}
+FILTRO_PADRAO = "proxy"
 ROTULOS_ESTADO = {"ativa": "Em andamento", "concluida": "Fechada", "erro": "Erro", "bloqueada": "Bloqueada"}
 
 
@@ -73,7 +81,10 @@ class ModeloConexoes(QAbstractTableModel):
     def __init__(self, segundos_apos_fechar: float = SEGUNDOS_APOS_FECHAR,
                  relogio: Callable[[], float] = time.time, parent=None):
         super().__init__(parent)
+        # Todas as conexões em andamento ou recém-encerradas; `_linhas` são as que passam no filtro.
+        self._entradas: list[EntradaLog] = []
         self._linhas: list[EntradaLog] = []
+        self._acoes_visiveis = FILTROS_CONEXOES[FILTRO_PADRAO]
         self._fechadas_em: dict[str, float] = {}
         self._espera = segundos_apos_fechar
         self._relogio = relogio
@@ -153,46 +164,64 @@ class ModeloConexoes(QAbstractTableModel):
         self.detalhado = detalhado
         self._emitir_tudo_mudou()
 
+    def definir_filtro(self, filtro: str) -> None:
+        self._acoes_visiveis = FILTROS_CONEXOES[filtro]
+        self.beginResetModel()
+        self._linhas = [entrada for entrada in self._entradas if entrada.acao in self._acoes_visiveis]
+        self.endResetModel()
+
     def adicionar_entradas(self, entradas: list[EntradaLog]) -> None:
-        entradas = [entrada for entrada in entradas if entrada.acao == "proxy"]
         if not entradas:
             return
-        primeira = len(self._linhas)
-        self.beginInsertRows(QModelIndex(), primeira, primeira + len(entradas) - 1)
-        self._linhas.extend(entradas)
-        self.endInsertRows()
+        self._entradas.extend(entradas)
         agora = self._relogio()
         for entrada in entradas:
             if entrada.estado != "ativa":
                 self._fechadas_em[entrada.id] = agora
+        visiveis = [entrada for entrada in entradas if entrada.acao in self._acoes_visiveis]
+        if not visiveis:
+            return
+        primeira = len(self._linhas)
+        self.beginInsertRows(QModelIndex(), primeira, primeira + len(visiveis) - 1)
+        self._linhas.extend(visiveis)
+        self.endInsertRows()
 
     def atualizar_entradas(self, entradas: list[EntradaLog]) -> None:
         por_id = {entrada.id: entrada for entrada in entradas}
         agora = self._relogio()
+        for posicao, atual in enumerate(self._entradas):
+            entrada = por_id.get(atual.id)
+            if entrada is not None:
+                self._entradas[posicao] = entrada
+                if entrada.estado != "ativa":
+                    self._fechadas_em.setdefault(entrada.id, agora)
         for linha, atual in enumerate(self._linhas):
             entrada = por_id.get(atual.id)
             if entrada is None:
                 continue
             self._linhas[linha] = entrada
-            if entrada.estado != "ativa":
-                self._fechadas_em.setdefault(entrada.id, agora)
             self.dataChanged.emit(self.index(linha, 0), self.index(linha, len(COLUNAS) - 1))
 
     def atualizar_tempos(self) -> None:
         """Chamado a cada segundo: remove as encerradas há tempo e atualiza as durações."""
         agora = self._relogio()
+        expiradas = {id_entrada for id_entrada, fechada_em in self._fechadas_em.items()
+                     if agora - fechada_em >= self._espera}
+        if expiradas:
+            self._entradas = [entrada for entrada in self._entradas if entrada.id not in expiradas]
         for linha in range(len(self._linhas) - 1, -1, -1):
-            fechada_em = self._fechadas_em.get(self._linhas[linha].id)
-            if fechada_em is not None and agora - fechada_em >= self._espera:
+            if self._linhas[linha].id in expiradas:
                 self.beginRemoveRows(QModelIndex(), linha, linha)
-                del self._fechadas_em[self._linhas[linha].id]
                 del self._linhas[linha]
                 self.endRemoveRows()
+        for id_entrada in expiradas:
+            del self._fechadas_em[id_entrada]
         if self._linhas:
             self.dataChanged.emit(self.index(0, COL_ESTADO), self.index(len(self._linhas) - 1, COL_ESTADO))
 
     def clear(self) -> None:
         self.beginResetModel()
+        self._entradas = []
         self._linhas = []
         self._fechadas_em = {}
         self.endResetModel()

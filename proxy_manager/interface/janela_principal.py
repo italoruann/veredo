@@ -18,7 +18,9 @@ from PySide6.QtWidgets import (
 from ..nucleo.configuracao import NOME_EXIBICAO
 from .contexto import Contexto
 from .icone import desenhar_icone
-from .modelo_conexoes import COL_APP, COL_RECEBIDO, COL_REGRA, COL_ENVIADO, COL_ESTADO, COL_DESTINO, formatar_bytes
+from .modelo_conexoes import (
+    COL_APP, COL_RECEBIDO, COL_REGRA, COL_ENVIADO, COL_ESTADO, COL_DESTINO, FILTRO_PADRAO, formatar_bytes,
+)
 from .paginas.proxies import PaginaProxies
 from .paginas.regras import PaginaRegras
 from .paginas.configuracoes import PaginaConfiguracoes
@@ -245,6 +247,7 @@ class JanelaPrincipal(QMainWindow):
 
         menu_exibir = self.barra_menus.addMenu("&Exibir")
         menu_exibir.addAction(self.acao_icone_bandeja)
+        menu_exibir.addMenu(self.menu_filtro_conexoes)
         menu_exibir.addSeparator()
         menu_janelas = menu_exibir.addMenu("&Janelas")
         for painel in (self.painel_conexoes, self.painel_trafego, self.painel_estatisticas):
@@ -309,6 +312,9 @@ class JanelaPrincipal(QMainWindow):
         self.acao_detalhado = self._acao("&Detalhado", self.ctx.modelo_conexoes.definir_detalhado,
                                          dica="Mostra PID e IP de destino nas conexões",
                                          icone=icone_linha("eye"), marcavel=True)
+        self.menu_filtro_conexoes = self._menu_opcoes("Conexões &exibidas", [
+            ("todas", "&Todas"), ("proxy", "Somente via &proxy"), ("direct", "Somente &diretas"),
+            ("block", "Somente &bloqueadas")], FILTRO_PADRAO, self.definir_filtro_conexoes)
         menu_tamanho_icones = self._menu_opcoes("Tamanho dos ícones", [
             ("small", "Ícones &pequenos"), ("large", "Ícones &grandes")], "small", self.definir_tamanho_icones)
         self.tabela_conexoes.addAction(self.acao_encerrar_processo)
@@ -318,6 +324,8 @@ class JanelaPrincipal(QMainWindow):
         barra = barra_painel()
         barra.addAction(self.acao_encerrar_processo)
         barra.addAction(self.acao_detalhado)
+        barra.addWidget(self._botao_menu(self.menu_filtro_conexoes, "filter",
+                                         "Conexões exibidas no painel e no log"))
         barra.addWidget(self._botao_menu(menu_tamanho_icones, "grid", "Tamanho dos ícones"))
         self.painel_conexoes = self._criar_painel(
             "Conexões", "ConnectionsPane", corpo_painel(barra, self.tabela_conexoes),
@@ -336,6 +344,10 @@ class JanelaPrincipal(QMainWindow):
         altura = ALTURAS_LINHA[tamanho]
         self.tabela_conexoes.setIconSize(QSize(altura - 2, altura - 2))
         self.tabela_conexoes.verticalHeader().setDefaultSectionSize(altura)
+
+    def definir_filtro_conexoes(self, filtro: str) -> None:
+        self.ctx.modelo_conexoes.definir_filtro(filtro)
+        self.log.definir_filtro(filtro)
 
     def encerrar_processo(self) -> None:
         indice = self.tabela_conexoes.currentIndex()

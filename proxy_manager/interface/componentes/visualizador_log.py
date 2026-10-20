@@ -7,7 +7,7 @@ from PySide6.QtGui import QColor, QFont, QTextCharFormat, QTextCursor
 from PySide6.QtWidgets import QPlainTextEdit, QWidget
 
 from ...nucleo.registro import EntradaLog
-from ..modelo_conexoes import ConjuntoIdsLimitado, formatar_bytes, formatar_duracao
+from ..modelo_conexoes import FILTRO_PADRAO, FILTROS_CONEXOES, ConjuntoIdsLimitado, formatar_bytes, formatar_duracao
 from ..tema import PALETA
 
 # Níveis do menu Log > Log na tela.
@@ -35,6 +35,7 @@ class VisualizadorLog(QPlainTextEdit):
         self.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
         self.setMaximumBlockCount(MAX_LINHAS_LOG)
         self.nivel = NIVEL_NORMAL
+        self._acoes_visiveis = FILTROS_CONEXOES[FILTRO_PADRAO]
         self._finalizadas = ConjuntoIdsLimitado()
         self._fmt_normal = QTextCharFormat()
         self._fmt_normal.setForeground(QColor(PALETA["text"]))
@@ -48,6 +49,10 @@ class VisualizadorLog(QPlainTextEdit):
 
     def definir_nivel(self, nivel: int) -> None:
         self.nivel = nivel
+
+    def definir_filtro(self, filtro: str) -> None:
+        """Vale para as próximas linhas; o que já está no log não muda."""
+        self._acoes_visiveis = FILTROS_CONEXOES[filtro]
 
     def definir_tamanho_fonte(self, tamanho: str) -> None:
         fonte = QFont()
@@ -75,7 +80,7 @@ class VisualizadorLog(QPlainTextEdit):
 
     def ao_adicionar_entradas(self, entradas: list[EntradaLog]) -> None:
         for entrada in entradas:
-            if entrada.acao != "proxy":
+            if entrada.acao not in self._acoes_visiveis:
                 continue
             self.mensagem(self._texto_abertura(entrada), momento=entrada.momento)
             if entrada.estado != "ativa":
@@ -83,7 +88,8 @@ class VisualizadorLog(QPlainTextEdit):
 
     def ao_atualizar_entradas(self, entradas: list[EntradaLog]) -> None:
         for entrada in entradas:
-            if entrada.acao == "proxy" and entrada.estado != "ativa" and entrada.id not in self._finalizadas:
+            if (entrada.acao in self._acoes_visiveis and entrada.estado != "ativa"
+                    and entrada.id not in self._finalizadas):
                 self._registrar_fim(entrada)
 
     def limpar_log(self) -> None:

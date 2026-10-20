@@ -79,6 +79,10 @@ class MotorProxy:
         self._ip_saida_em_verificacao: set[str] = set()
         # Último IP conhecido de cada perfil, para avisar quando ele muda.
         self._ip_saida_por_perfil: dict[str, str] = {}
+        # Endereço (chave do cache) de cada perfil na última revisão, para notar edições.
+        self._chaves_perfis: dict[str, str] = {}
+        # id da entrada -> (id do perfil, chave do perfil ao conectar, escritores do túnel).
+        self._tuneis_proxy: dict[str, tuple[str, str, tuple[asyncio.StreamWriter, ...]]] = {}
 
         self.conexoes_ativas = 0
         self.total_enviado = 0
@@ -96,6 +100,33 @@ class MotorProxy:
     def atualizar_configuracao(self, configuracao: Configuracao) -> None:
         self.configuracao = configuracao
         self.conjunto_regras = ConjuntoRegras.interpretar(configuracao.texto_regras)
+        loop = self._loop
+        if self.em_execucao() and loop is not None and loop.is_running():
+            loop.call_soon_threadsafe(self._revisar_perfis)
+
+    def _revisar_perfis(self) -> None:
+        """Roda no loop do motor depois de uma edição na configuração.
+
+        Túneis abertos por um perfil cujo endereço mudou (ou que foi removido) são encerrados,
+        para que os aplicativos reconectem pelo endereço novo, e o IP de saída do perfil é
+        consultado na hora, sem esperar a próxima conexão."""
+        perfis = {perfil.id: perfil for perfil in self.configuracao.proxies}
+        chaves = {id_perfil: self._chave_cache_ip(perfil) for id_perfil, perfil in perfis.items()}
+
+        for id_entrada, (id_perfil, chave, escritores) in list(self._tuneis_proxy.items()):
+            if chaves.get(id_perfil) != chave:
+                del self._tuneis_proxy[id_entrada]
+                for escritor in escritores:
+                    try:
+                        escritor.transport.abort()
+                    except Exception:
+                        pass
+
+        for id_perfil, chave in chaves.items():
+            anterior = self._chaves_perfis.get(id_perfil)
+            if anterior is not None and anterior != chave and perfis[id_perfil].ativo:
+                self._em_segundo_plano(self._atualizar_ip_saida(perfis[id_perfil]))
+        self._chaves_perfis = chaves
 
     def iniciar(self) -> None:
         if self.em_execucao():
@@ -161,6 +192,7 @@ class MotorProxy:
                 self._atender_transparente, "127.0.0.1", prefs.porta_transparente)
             self.backend_transparente = backend
 
+        self._chaves_perfis = {perfil.id: self._chave_cache_ip(perfil) for perfil in self.configuracao.proxies}
         self._emitir_estado(True, "Motor iniciado")
 
     def _texto_pac(self) -> str:
@@ -181,6 +213,7 @@ class MotorProxy:
             except Exception:
                 pass
         self._escritores_ativos.clear()
+        self._tuneis_proxy.clear()
 
         pendentes = list(self._tarefas_fundo)
         for tarefa in pendentes:
@@ -266,6 +299,7 @@ class MotorProxy:
 
         self.configuracao = nova_configuracao
         self.conjunto_regras = ConjuntoRegras.interpretar(nova_configuracao.texto_regras)
+        self._revisar_perfis()
 
         if aplicados:
             # Também faz o contexto reaplicar o PAC no sistema, caso a porta dele tenha mudado.
@@ -381,7 +415,8 @@ class MotorProxy:
 
     @staticmethod
     def _chave_cache_ip(perfil: PerfilProxy) -> str:
-        return f"{perfil.id}:{perfil.type}:{perfil.host}:{perfil.port}"
+        # O usuário entra na chave: muitos provedores escolhem o IP de saída pelo nome de usuário.
+        return f"{perfil.id}:{perfil.type}:{perfil.host}:{perfil.port}:{perfil.usuario}"
 
     async def _resolver_ip_destino(self, id_entrada: str, host: str) -> None:
         try:
@@ -391,7 +426,8 @@ class MotorProxy:
         if infos:
             self.registro.atualizar(id_entrada, ip_destino=infos[0][4][0])
 
-    async def _atualizar_ip_saida(self, perfil: PerfilProxy, id_entrada: str, tinha_valor: bool) -> None:
+    async def _atualizar_ip_saida(self, perfil: PerfilProxy, id_entrada: Optional[str] = None,
+                                  tinha_valor: bool = False) -> None:
         chave = self._chave_cache_ip(perfil)
         if chave in self._ip_saida_em_verificacao:
             return
@@ -403,13 +439,14 @@ class MotorProxy:
 
         if ip:
             self._cache_ip_saida[chave] = (time.time(), ip)
-            self.registro.atualizar(id_entrada, ip_proxy=ip)
+            if id_entrada is not None:
+                self.registro.atualizar(id_entrada, ip_proxy=ip)
             anterior = self._ip_saida_por_perfil.get(perfil.id, "")
             if ip != anterior:
                 self._ip_saida_por_perfil[perfil.id] = ip
                 if self.ao_mudar_ip_saida:
                     self.ao_mudar_ip_saida(perfil.id, anterior, ip)
-        elif not tinha_valor:
+        elif id_entrada is not None and not tinha_valor:
             # "?" indica que a verificação falhou; um valor antigo em cache é mantido.
             self.registro.atualizar(id_entrada, ip_proxy="?")
 
@@ -451,7 +488,7 @@ class MotorProxy:
             return
 
         await socks5.responder_cliente(escritor, socks5.REP_SUCCESS)
-        await self._tunelar(leitor, escritor, leitor_destino, escritor_destino, resultado, entrada, inicio)
+        await self._tunelar(leitor, escritor, leitor_destino, escritor_destino, resultado, perfil, entrada, inicio)
 
     async def _atender_http(self, leitor: asyncio.StreamReader, escritor: asyncio.StreamWriter) -> None:
         inicio = time.monotonic()
@@ -490,7 +527,7 @@ class MotorProxy:
         if eh_connect:
             escritor.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
             await escritor.drain()
-        await self._tunelar(leitor, escritor, leitor_destino, escritor_destino, resultado, entrada, inicio)
+        await self._tunelar(leitor, escritor, leitor_destino, escritor_destino, resultado, perfil, entrada, inicio)
 
     async def _atender_transparente(self, leitor: asyncio.StreamReader, escritor: asyncio.StreamWriter) -> None:
         inicio = time.monotonic()
@@ -538,7 +575,7 @@ class MotorProxy:
 
         if prefixo:
             self._contar(len(prefixo), enviado=True, via_proxy=resultado.tipo_acao == "proxy")
-        await self._tunelar(leitor, escritor, leitor_destino, escritor_destino, resultado, entrada, inicio,
+        await self._tunelar(leitor, escritor, leitor_destino, escritor_destino, resultado, perfil, entrada, inicio,
                             ja_enviados=len(prefixo))
 
     # -- utilidades -------------------------------------------------------------------
@@ -572,9 +609,12 @@ class MotorProxy:
 
     async def _tunelar(self, leitor: asyncio.StreamReader, escritor: asyncio.StreamWriter,
                        leitor_destino: asyncio.StreamReader, escritor_destino: asyncio.StreamWriter,
-                       resultado: Resultado, entrada: EntradaLog, inicio: float, ja_enviados: int = 0) -> None:
+                       resultado: Resultado, perfil: Optional[PerfilProxy], entrada: EntradaLog, inicio: float,
+                       ja_enviados: int = 0) -> None:
         self.conexoes_ativas += 1
         self._escritores_ativos.update((escritor, escritor_destino))
+        if resultado.tipo_acao == "proxy" and perfil is not None:
+            self._tuneis_proxy[entrada.id] = (perfil.id, self._chave_cache_ip(perfil), (escritor, escritor_destino))
         try:
             enviados, recebidos = await self._encaminhar(
                 leitor, escritor, leitor_destino, escritor_destino, via_proxy=resultado.tipo_acao == "proxy")
@@ -582,6 +622,7 @@ class MotorProxy:
             self.conexoes_ativas -= 1
             self._escritores_ativos.discard(escritor)
             self._escritores_ativos.discard(escritor_destino)
+            self._tuneis_proxy.pop(entrada.id, None)
         self._finalizar(entrada, inicio, estado="concluida", bytes_enviados=enviados + ja_enviados,
                         bytes_recebidos=recebidos)
 

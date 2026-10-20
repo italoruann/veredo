@@ -123,6 +123,35 @@ def test_painel_conexoes_mantem_encerradas_por_um_tempo(app):
     assert modelo.rowCount() == 1 and modelo.entrada_em(0).id == ativo.id
 
 
+def test_painel_conexoes_filtra_por_acao(app):
+    from proxy_manager.interface.modelo_conexoes import ModeloConexoes
+
+    agora = [1000.0]
+    modelo = ModeloConexoes(segundos_apos_fechar=3, relogio=lambda: agora[0])
+    via_proxy = EntradaLog(nome_processo="chrome.exe", host_destino="a.com", acao="proxy")
+    direta = EntradaLog(nome_processo="edge", host_destino="c.com", acao="direct")
+    bloqueada = EntradaLog(nome_processo="edge", host_destino="d.com", acao="block", estado="bloqueada")
+    modelo.adicionar_entradas([via_proxy, direta, bloqueada])
+
+    def ids():
+        return [modelo.entrada_em(linha).id for linha in range(modelo.rowCount())]
+
+    assert ids() == [via_proxy.id]
+    modelo.definir_filtro("todas")
+    assert ids() == [via_proxy.id, direta.id, bloqueada.id]
+    modelo.definir_filtro("direct")
+    assert ids() == [direta.id]
+
+    # Diretas atualizadas enquanto ocultas aparecem com o estado novo e também expiram.
+    modelo.definir_filtro("proxy")
+    modelo.atualizar_entradas([EntradaLog(**{**direta.__dict__, "estado": "concluida"})])
+    modelo.definir_filtro("todas")
+    assert modelo.entrada_em(1).estado == "concluida"
+    agora[0] += 3
+    modelo.atualizar_tempos()
+    assert ids() == [via_proxy.id]
+
+
 def test_log_escreve_uma_linha_por_evento(window):
     log = window.log
     log.limpar_log()
