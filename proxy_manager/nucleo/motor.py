@@ -575,10 +575,11 @@ class MotorProxy:
         pedido.host = self._nome_do_ip_falso(pedido.host) or pedido.host
 
         resultado, rota, entrada = await self._preparar(
-            pedido.host, pedido.port, origem[0], origem[1], self.configuracao.preferencias.porta_socks, "socks5")
+            pedido.host, pedido.port, origem[0], origem[1], self.configuracao.preferencias.porta_socks,
+            "socks5" if pedido.versao == socks5.SOCKS_VERSION else "socks4")
 
         if resultado.tipo_acao == "block":
-            await socks5.responder_cliente(escritor, socks5.REP_NOT_ALLOWED)
+            await socks5.responder_cliente(escritor, socks5.REP_NOT_ALLOWED, versao=pedido.versao)
             escritor.close()
             self._finalizar_bloqueada(entrada, inicio, resultado)
             return
@@ -587,12 +588,12 @@ class MotorProxy:
             leitor_destino, escritor_destino = await self._conectar_destino(
                 resultado, rota, pedido.host, pedido.port, entrada)
         except Exception as exc:
-            await socks5.responder_cliente(escritor, socks5.REP_HOST_UNREACHABLE)
+            await socks5.responder_cliente(escritor, socks5.REP_HOST_UNREACHABLE, versao=pedido.versao)
             escritor.close()
             self._finalizar(entrada, inicio, estado="erro", erro=str(exc))
             return
 
-        await socks5.responder_cliente(escritor, socks5.REP_SUCCESS)
+        await socks5.responder_cliente(escritor, socks5.REP_SUCCESS, versao=pedido.versao)
         await self._tunelar(leitor, escritor, leitor_destino, escritor_destino, resultado, rota, entrada, inicio)
 
     async def _atender_http(self, leitor: asyncio.StreamReader, escritor: asyncio.StreamWriter) -> None:

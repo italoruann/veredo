@@ -43,6 +43,11 @@ def liberar_porta(porta: int) -> None:
             _portas_proprias.pop(porta, None)
 
 
+def endereco_socket(ip: str, porta: int) -> tuple:
+    # O loop Proactor do Windows recusa (EINVAL) o par (ip, porta) em sockets IPv6.
+    return (ip, porta, 0, 0) if ":" in ip else (ip, porta)
+
+
 async def resolver(host: str) -> list[str]:
     """Endereços IP de `host`, pelo resolvedor ativo."""
     host = host.strip("[]")
@@ -78,7 +83,7 @@ async def _abrir(host: str, porta: int, **kwargs) -> tuple[asyncio.StreamReader,
             sock.bind(("::" if familia == socket.AF_INET6 else "0.0.0.0", 0))
             porta_local = sock.getsockname()[1]
             reservar_porta(porta_local)
-            await loop.sock_connect(sock, (endereco, porta))
+            await loop.sock_connect(sock, endereco_socket(endereco, porta))
         except OSError as exc:
             sock.close()
             ultimo_erro = exc
