@@ -34,6 +34,8 @@ TEXTO_REGRAS_PADRAO = """\
 #   *.exemplo.com +direct          conexão direta
 #   *.exemplo.com +proxy:Nome      usa um perfil de proxy específico
 #   *.exemplo.com +block           bloqueia
+#   *.exemplo.com:443              só na porta 443 (também 80,443 ou 8000-8100)
+#   10.0.0.1-10.0.0.50 +direct     faixa de IPs
 #   !*.exemplo.com                 regra desativada
 
 *.example.com

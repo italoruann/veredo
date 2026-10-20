@@ -10,6 +10,8 @@ import platform
 import threading
 from typing import Optional
 
+from .. import rede
+
 
 def suportado() -> bool:
     if platform.system() != "Windows":
@@ -104,6 +106,8 @@ class ModoTransparenteWindows:
             with self._trava:
                 rastreado = self._tabela_nat.get(tcp.src_port)
             eh_syn_novo = tcp.syn and not tcp.ack
+            if rastreado is None and eh_syn_novo and rede.porta_propria(tcp.src_port):
+                return False  # conexão do próprio motor: capturá-la de novo criaria um loop
             if rastreado is None and eh_syn_novo:
                 rastreado = (pacote.dst_addr, pacote.dst_port)
                 with self._trava:

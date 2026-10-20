@@ -5,6 +5,8 @@ import asyncio
 import struct
 from dataclasses import dataclass
 
+from . import rede
+
 SOCKS_VERSION = 0x05
 
 ATYP_IPV4 = 0x01
@@ -86,7 +88,7 @@ async def conectar_via_socks5(host: str, port: int, host_destino: str, porta_des
                               usuario: str = "", senha: str = "",
                               timeout: float = 15.0) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
     """Conecta ao proxy SOCKS5 e abre um túnel até o destino."""
-    leitor, escritor = await asyncio.wait_for(asyncio.open_connection(host, port), timeout=timeout)
+    leitor, escritor = await rede.abrir_conexao(host, port, timeout=timeout)
     try:
         metodos = bytes([0x00, 0x02]) if usuario else bytes([0x00])
         escritor.write(bytes([SOCKS_VERSION, len(metodos)]) + metodos)

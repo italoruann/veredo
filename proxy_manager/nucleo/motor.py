@@ -9,7 +9,7 @@ import threading
 import time
 from typing import Callable, Optional, Protocol
 
-from . import processos, proxy_http, socks5, verificacao_ip
+from . import processos, proxy_http, rede, socks5, verificacao_ip
 from .configuracao import Configuracao, PerfilProxy
 from .integracao_sistema import gerar_script_pac, iniciar_servidor_pac
 from .registro import EntradaLog, Registro
@@ -356,12 +356,37 @@ class MotorProxy:
             return self.configuracao.buscar_proxy(resultado.nome_proxy)
         return self.configuracao.proxy_padrao()
 
+    def _portas_locais(self) -> set[int]:
+        prefs = self.configuracao.preferencias
+        portas = {prefs.porta_socks, prefs.porta_http, prefs.porta_pac}
+        if prefs.modo_transparente_ativo:
+            portas.add(prefs.porta_transparente)
+        return portas
+
+    def _evitar_loop(self, resultado: Resultado, host: str, porta: int) -> Resultado:
+        """Bloqueia conexões às portas do próprio Veredo e manda direto as que vão ao próprio
+        servidor proxy; nos dois casos a conexão voltaria ao motor sem fim."""
+        destino_local = host.lower() == "localhost" or (
+            _ip_literal(host) is not None and ipaddress.ip_address(host).is_loopback)
+        if destino_local and porta in self._portas_locais():
+            return Resultado(tipo_acao="block", nome_proxy=None, regra=None, motivo="loop")
+        if resultado.tipo_acao == "proxy":
+            for perfil in self.configuracao.proxies:
+                if perfil.port == porta and perfil.host.lower() == host.lower():
+                    return Resultado(tipo_acao="direct", nome_proxy=None, regra=None,
+                                     motivo="servidor proxy")
+        return resultado
+
     @staticmethod
     def _rotulo_regra(resultado: Resultado) -> str:
+        if resultado.motivo == "loop":
+            return "(loop detectado)"
+        if resultado.motivo:
+            return f"({resultado.motivo})"
         regra = resultado.regra
         if regra is None:
             return "(padrão)"
-        return regra.alvo if regra.acao == "proxy" else f"{regra.alvo} +{regra.acao}"
+        return regra.alvo_completo if regra.acao == "proxy" else f"{regra.alvo_completo} +{regra.acao}"
 
     async def _preparar(self, host_destino: str, porta_destino: int, ip_origem: str, porta_origem: int,
                         porta_escuta: int, protocolo: str, host_regras: Optional[str] = None,
@@ -376,7 +401,9 @@ class MotorProxy:
         ip_literal = _ip_literal(host_destino)
         host_para_regras = host_regras or host_destino
         resultado = self.conjunto_regras.avaliar(proc.nome, proc.caminho, host_para_regras, ip_literal,
-                                                 acao_padrao=self.configuracao.preferencias.acao_padrao)
+                                                 acao_padrao=self.configuracao.preferencias.acao_padrao,
+                                                 porta=porta_destino)
+        resultado = self._evitar_loop(resultado, host_destino, porta_destino)
         perfil: Optional[PerfilProxy] = None
         rotulo_proxy = ""
         ip_proxy = ""
@@ -453,7 +480,7 @@ class MotorProxy:
     async def _conectar_destino(self, resultado: Resultado, perfil: Optional[PerfilProxy],
                                 host: str, porta: int):
         if resultado.tipo_acao == "direct":
-            return await asyncio.open_connection(host, porta)
+            return await rede.abrir_conexao(host, porta)
         if perfil is None:
             raise RuntimeError("nenhum perfil de proxy disponível para esta regra")
         conectar = socks5.conectar_via_socks5 if perfil.type == "socks5" else proxy_http.conectar_via_http
@@ -476,7 +503,7 @@ class MotorProxy:
         if resultado.tipo_acao == "block":
             await socks5.responder_cliente(escritor, socks5.REP_NOT_ALLOWED)
             escritor.close()
-            self._finalizar(entrada, inicio, estado="bloqueada")
+            self._finalizar_bloqueada(entrada, inicio, resultado)
             return
 
         try:
@@ -506,7 +533,7 @@ class MotorProxy:
 
         if resultado.tipo_acao == "block":
             await self._erro_http(escritor, 403, "Forbidden")
-            self._finalizar(entrada, inicio, estado="bloqueada")
+            self._finalizar_bloqueada(entrada, inicio, resultado)
             return
 
         via_proxy_http = resultado.tipo_acao == "proxy" and perfil is not None and perfil.type == "http"
@@ -559,7 +586,7 @@ class MotorProxy:
 
         if resultado.tipo_acao == "block":
             escritor.close()
-            self._finalizar(entrada, inicio, estado="bloqueada")
+            self._finalizar_bloqueada(entrada, inicio, resultado)
             return
 
         try:
@@ -579,6 +606,10 @@ class MotorProxy:
                             ja_enviados=len(prefixo))
 
     # -- utilidades -------------------------------------------------------------------
+
+    def _finalizar_bloqueada(self, entrada: EntradaLog, inicio: float, resultado: Resultado) -> None:
+        erro = "loop de conexão: o destino é o próprio Veredo" if resultado.motivo == "loop" else ""
+        self._finalizar(entrada, inicio, estado="bloqueada", erro=erro)
 
     def _finalizar(self, entrada: EntradaLog, inicio: float, **mudancas) -> None:
         duracao = int((time.monotonic() - inicio) * 1000)
