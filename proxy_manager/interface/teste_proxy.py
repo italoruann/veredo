@@ -1,11 +1,12 @@
-"""Teste de conectividade de um perfil, executado fora da thread da interface."""
+"""Teste de conectividade de um perfil ou cadeia, executado fora da thread da interface."""
 from __future__ import annotations
 
 import asyncio
 
 from PySide6.QtCore import QThread, Signal
 
-from ..nucleo import proxy_http, socks5
+from ..nucleo import cliente_proxy, proxy_http, socks5
+from ..nucleo.cliente_proxy import ErroRota, ErroSocks4, Rota
 from ..nucleo.configuracao import PerfilProxy
 
 HOST_TESTE = "1.1.1.1"
@@ -15,9 +16,9 @@ PORTA_TESTE = 443
 class TesteProxy(QThread):
     teste_concluido = Signal(bool, str)
 
-    def __init__(self, perfil: PerfilProxy, parent=None):
+    def __init__(self, alvo: PerfilProxy | Rota, parent=None):
         super().__init__(parent)
-        self.perfil = perfil
+        self.rota = cliente_proxy.rota_do_perfil(alvo) if isinstance(alvo, PerfilProxy) else alvo
 
     def run(self) -> None:
         try:
@@ -27,21 +28,19 @@ class TesteProxy(QThread):
         self.teste_concluido.emit(ok, mensagem)
 
     async def _testar(self) -> tuple[bool, str]:
-        perfil = self.perfil
-        if not perfil.host or not perfil.port:
+        rota = self.rota
+        if not rota.perfis:
+            return False, "A cadeia não tem nenhum proxy habilitado."
+        if any(not perfil.host or not perfil.port for perfil in rota.perfis):
             return False, "Preencha host e porta antes de testar."
+        rota.timeout = min(rota.timeout, 8.0)
         try:
-            if perfil.type == "socks5":
-                leitor, escritor = await socks5.conectar_via_socks5(
-                    perfil.host, perfil.port, HOST_TESTE, PORTA_TESTE,
-                    perfil.usuario, perfil.senha, timeout=8.0)
-            else:
-                leitor, escritor = await proxy_http.conectar_via_http(
-                    perfil.host, perfil.port, HOST_TESTE, PORTA_TESTE,
-                    perfil.usuario, perfil.senha, timeout=8.0)
+            _leitor, escritor, usado = await cliente_proxy.conectar_rota(rota, HOST_TESTE, PORTA_TESTE)
             escritor.close()
-            return True, "Conexão e autenticação OK."
-        except (socks5.ErroSocks5, proxy_http.ErroProxyHttp) as exc:
+        except (socks5.ErroSocks5, proxy_http.ErroProxyHttp, ErroSocks4, ErroRota) as exc:
             return False, f"O proxy recusou a conexão: {exc}"
         except (OSError, asyncio.TimeoutError) as exc:
-            return False, f"Não foi possível conectar ao proxy: {exc}"
+            return False, f"Não foi possível conectar ao proxy: {exc or 'tempo esgotado'}"
+        if rota.eh_cadeia and usado is not None:
+            return True, f"Conexão OK (atendida por {usado.nome})."
+        return True, "Conexão e autenticação OK."

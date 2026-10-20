@@ -241,3 +241,48 @@ def test_trocar_porta_do_perfil_com_motor_ligado(monkeypatch):
                 servidor.close()
 
     asyncio.run(cenario())
+
+
+def test_conexao_para_porta_do_proprio_motor_e_bloqueada():
+    async def cenario():
+        motor, registro = _criar_motor("* +direct\n", acao_padrao="direct")
+        motor.iniciar()
+        try:
+            leitor, escritor = await asyncio.open_connection("127.0.0.1", PORTA_HTTP)
+            pedido = (f"GET http://127.0.0.1:{PORTA_SOCKS}/ HTTP/1.1\r\n"
+                      f"Host: 127.0.0.1:{PORTA_SOCKS}\r\nConnection: close\r\n\r\n").encode()
+            escritor.write(pedido)
+            await escritor.drain()
+            dados = await leitor.read(-1)
+            assert b"403" in dados
+
+            await asyncio.sleep(0.2)
+            entrada = registro.recentes()[-1]
+            assert entrada.estado == "bloqueada"
+            assert "loop" in entrada.erro
+        finally:
+            motor.parar()
+
+    asyncio.run(cenario())
+
+
+def test_conexao_ao_proprio_servidor_proxy_vai_direto():
+    async def cenario():
+        servidor_destino, porta_destino = await _iniciar_servidor_destino(b"ok")
+        proxy = PerfilProxy(nome="p", type="socks5", host="127.0.0.1", port=porta_destino, padrao=True)
+        motor, registro = _criar_motor("*\n", proxies=[proxy])
+        motor.iniciar()
+        try:
+            leitor, escritor = await asyncio.open_connection("127.0.0.1", PORTA_HTTP)
+            pedido = (f"GET http://127.0.0.1:{porta_destino}/ HTTP/1.1\r\n"
+                      f"Host: 127.0.0.1:{porta_destino}\r\nConnection: close\r\n\r\n").encode()
+            escritor.write(pedido)
+            await escritor.drain()
+            assert b"ok" in await leitor.read(-1)
+            await asyncio.sleep(0.2)
+            assert registro.recentes()[-1].acao == "direct"
+        finally:
+            motor.parar()
+            servidor_destino.close()
+
+    asyncio.run(cenario())

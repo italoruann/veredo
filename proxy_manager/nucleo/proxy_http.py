@@ -7,6 +7,8 @@ import base64
 from dataclasses import dataclass, field
 from urllib.parse import urlsplit
 
+from . import rede
+
 
 class ErroProxyHttp(Exception):
     pass
@@ -46,7 +48,7 @@ def extrair_destino(cabecalho: CabecalhoHttp) -> tuple[str, int]:
         host, _, porta_txt = cabecalho.alvo.rpartition(":")
         if not host:
             raise ErroProxyHttp(f"alvo de CONNECT inválido: {cabecalho.alvo!r}")
-        return host, int(porta_txt)
+        return host.strip("[]"), int(porta_txt)
 
     if cabecalho.alvo.startswith("http://") or cabecalho.alvo.startswith("https://"):
         analisado = urlsplit(cabecalho.alvo)
@@ -54,7 +56,10 @@ def extrair_destino(cabecalho: CabecalhoHttp) -> tuple[str, int]:
         return analisado.hostname or "", port
 
     cabecalho_host = cabecalho.valor_cabecalho("Host") or ""
-    if ":" in cabecalho_host:
+    if cabecalho_host.startswith("["):
+        host, _, resto = cabecalho_host[1:].partition("]")
+        return host, int(resto[1:]) if resto.startswith(":") else 80
+    if cabecalho_host.count(":") == 1:
         host, _, porta_txt = cabecalho_host.rpartition(":")
         return host, int(porta_txt)
     return cabecalho_host, 80
@@ -69,21 +74,18 @@ def requisicao_forma_origem(cabecalho: CabecalhoHttp) -> bytes:
         if analisado.query:
             caminho += "?" + analisado.query
     linha_requisicao = f"{cabecalho.metodo} {caminho} {cabecalho.versao_http}\r\n"
-    cabecalhos_mantidos = [h for h in cabecalho.cabecalhos if not h.lower().startswith("proxy-connection:")]
+    # Cabeçalhos Proxy-* são para o proxy local e não devem chegar ao servidor de destino.
+    cabecalhos_mantidos = [h for h in cabecalho.cabecalhos if not h.lower().startswith("proxy-")]
     return (linha_requisicao + "\r\n".join(cabecalhos_mantidos) + "\r\n\r\n").encode("iso-8859-1")
 
 
-def requisicao_forma_absoluta(cabecalho: CabecalhoHttp, auth_proxy: str | None) -> bytes:
-    """Mantém a URL completa para repassar a outro proxy HTTP, com autenticação se houver."""
-    cabecalhos = list(cabecalho.cabecalhos)
-    if auth_proxy:
-        cabecalhos = [h for h in cabecalhos if not h.lower().startswith("proxy-authorization:")]
-        cabecalhos.append(f"Proxy-Authorization: Basic {auth_proxy}")
-    return (cabecalho.primeira_linha + "\r\n" + "\r\n".join(cabecalhos) + "\r\n\r\n").encode("iso-8859-1")
+def _host_porta(host: str, porta: int) -> str:
+    return f"[{host}]:{porta}" if ":" in host else f"{host}:{porta}"
 
 
 def requisicao_connect(host_destino: str, porta_destino: int, auth_proxy: str | None) -> bytes:
-    linhas = [f"CONNECT {host_destino}:{porta_destino} HTTP/1.1", f"Host: {host_destino}:{porta_destino}"]
+    alvo = _host_porta(host_destino, porta_destino)
+    linhas = [f"CONNECT {alvo} HTTP/1.1", f"Host: {alvo}"]
     if auth_proxy:
         linhas.append(f"Proxy-Authorization: Basic {auth_proxy}")
     linhas.append("Proxy-Connection: Keep-Alive")
@@ -104,18 +106,25 @@ async def ler_linha_status(leitor: asyncio.StreamReader, timeout: float = 20.0) 
     return int(partes[1]), (partes[2] if len(partes) > 2 else "")
 
 
+async def negociar_connect(leitor: asyncio.StreamReader, escritor: asyncio.StreamWriter,
+                           host_destino: str, porta_destino: int, usuario: str = "", senha: str = "",
+                           timeout: float = 15.0) -> None:
+    """Pede um túnel CONNECT sobre uma conexão já aberta com o proxy."""
+    auth = auth_basica(usuario, senha) if usuario else None
+    escritor.write(requisicao_connect(host_destino, porta_destino, auth))
+    await escritor.drain()
+    estado, motivo = await ler_linha_status(leitor, timeout=timeout)
+    if estado != 200:
+        raise ErroProxyHttp(f"o proxy recusou o CONNECT:{estado} {motivo}")
+
+
 async def conectar_via_http(host: str, port: int, host_destino: str, porta_destino: int,
                             usuario: str = "", senha: str = "",
                             timeout: float = 15.0) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
-    leitor, escritor = await asyncio.wait_for(asyncio.open_connection(host, port), timeout=timeout)
+    leitor, escritor = await rede.abrir_conexao(host, port, timeout=timeout)
     try:
-        auth = auth_basica(usuario, senha) if usuario else None
-        escritor.write(requisicao_connect(host_destino, porta_destino, auth))
-        await escritor.drain()
-        estado, motivo = await ler_linha_status(leitor, timeout=timeout)
-        if estado != 200:
-            raise ErroProxyHttp(f"o proxy recusou o CONNECT:{estado} {motivo}")
+        await negociar_connect(leitor, escritor, host_destino, porta_destino, usuario, senha, timeout)
         return leitor, escritor
-    except Exception:
+    except BaseException:
         escritor.close()
         raise

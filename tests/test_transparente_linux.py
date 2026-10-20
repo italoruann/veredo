@@ -60,10 +60,14 @@ def test_iniciar_aplica_regras_nftables(root_falso, comandos_registrados):
     # a exclusão do próprio tráfego (evita loop) precisa existir
     chamadas_dono = [c for c in comandos_registrados if "skuid" in c]
     assert chamadas_dono, "deveria excluir o próprio uid do redirect pra evitar loop"
-    # QUIC e TCP/IPv6 não são interceptáveis: precisam ser rejeitados pra não vazarem direto
+    # QUIC não é interceptável: precisa ser rejeitado pra não vazar direto
     chamadas_rejeitar = [c for c in comandos_registrados if "reject" in c]
     assert any("udp" in c and "443" in c for c in chamadas_rejeitar), "QUIC deveria ser rejeitado"
-    assert any("ipv6" in c and "tcp" in c for c in chamadas_rejeitar), "TCP/IPv6 deveria ser rejeitado"
+    # TCP de qualquer família (IPv4 e IPv6) é redirecionado; nenhum TCP é rejeitado
+    assert any("tcp" in c and "nfproto" not in c for c in chamadas_redirecionar)
+    assert not any("tcp" in c for c in chamadas_rejeitar)
+    # sem DNS pelo proxy, a porta 53 não é desviada
+    assert not any("53" in c for c in comandos_registrados)
     # tudo isolado numa tabela própria (nunca mexe em OUTPUT/chains do sistema)
     assert all("OUTPUT" not in c for c in comandos_registrados)
 
@@ -128,3 +132,42 @@ def test_iniciar_explica_como_instalar_nft(root_falso, monkeypatch):
     ok, mensagem = mod.ModoTransparenteLinux(58095).iniciar()
     assert ok is False
     assert "apt install nftables" in mensagem
+
+
+def test_dns_pelo_proxy_desvia_porta_53_antes_da_excecao_de_loopback():
+    comandos = ModoTransparenteLinux(58095, porta_dns=58053).comandos("1000")
+    nat = [c for c in comandos if "output" in c and c[:3] == ["nft", "add", "rule"]]
+    indice_dns = next(i for i, c in enumerate(nat) if "53" in c and ":58053" in c)
+    indice_loopback = next(i for i, c in enumerate(nat) if "127.0.0.0/8" in c)
+    indice_dono = next(i for i, c in enumerate(nat) if "skuid" in c)
+    # o próprio Veredo consulta o DNS real sem desvio; o resto (até o 127.0.0.53) vem para cá
+    assert indice_dono < indice_dns < indice_loopback
+
+
+def test_prevencao_de_vazamento_rejeita_todo_udp():
+    comandos = ModoTransparenteLinux(58095, porta_dns=58053, bloquear_todo_udp=True).comandos("1000")
+    rejeitar = [c for c in comandos if "reject" in c]
+    assert rejeitar == [["nft", "add", "rule", "inet", mod.NOME_TABELA, "block_unsupported",
+                         "meta", "l4proto", "udp", "reject"]]
+
+
+def test_udp_pelas_regras_marca_e_desvia_com_tproxy():
+    comandos = ModoTransparenteLinux(58095, porta_dns=58053, bloquear_todo_udp=True,
+                                     capturar_udp=True).comandos("1000")
+    # com UDP pelas regras nada de UDP é rejeitado: as regras decidem
+    assert not [c for c in comandos if "reject" in c]
+    marca = [c for c in comandos if "udp_marca" in c and c[2] == "rule"]
+    assert marca[0][-3:] == ["skuid", "1000", "return"]  # o próprio Veredo nunca é desviado
+    assert marca[-1][-3:] == ["mark", "set", mod.MARCA_UDP]
+    tproxy = [c for c in comandos if "tproxy" in c]
+    assert [c[-1] for c in tproxy] == ["127.0.0.1:58095", "[::1]:58095"]
+    rotas = [c for c in comandos if c[0] == "ip"]
+    assert ["ip", "-4", "rule", "add", "fwmark", mod.MARCA_UDP, "lookup", mod.TABELA_ROTAS] in rotas
+
+
+def test_destino_original_do_datagrama_ipv4_e_ipv6():
+    ipv4 = struct.pack("!HH4s8x", socket.AF_INET, 5353, socket.inet_aton("8.8.4.4"))
+    assert mod._ler_destino_original([(mod._SOL_IP, mod._IP_RECVORIGDSTADDR, ipv4)]) == ("8.8.4.4", 5353)
+    ipv6 = struct.pack("!HHI16sI", socket.AF_INET6, 3478, 0, socket.inet_pton(socket.AF_INET6, "2001:db8::9"), 0)
+    assert mod._ler_destino_original([(mod._SOL_IPV6, mod._IPV6_RECVORIGDSTADDR, ipv6)]) == ("2001:db8::9", 3478)
+    assert mod._ler_destino_original([]) is None

@@ -1,7 +1,10 @@
-"""Configurações: portas locais, proxy do sistema, ação padrão, logs e preferências gerais."""
+"""Configurações: portas locais, proxy do sistema, ação padrão, logs, preferências gerais,
+modo transparente e serviço do sistema."""
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, QUrl
+import threading
+
+from PySide6.QtCore import Qt, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QFormLayout, QFrame, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
@@ -9,7 +12,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..contexto import Contexto
-from ...nucleo import inicio_automatico, integracao_sistema
+from ...nucleo import inicio_automatico, integracao_sistema, servico
 from ...nucleo.configuracao import NOME_EXIBICAO, pasta_dados
 from ..componentes.responsivo import caixa_com_quebra
 
@@ -27,6 +30,9 @@ def _cartao(texto_titulo: str) -> tuple[QFrame, QVBoxLayout]:
 
 
 class PaginaConfiguracoes(QWidget):
+    # (instalando, ok, mensagem) vindo da thread que espera o UAC/pkexec
+    _servico_concluido = Signal(bool, bool, str)
+
     def __init__(self, ctx: Contexto, parent: QWidget | None = None):
         super().__init__(parent)
         self.ctx = ctx
@@ -58,6 +64,7 @@ class PaginaConfiguracoes(QWidget):
         raiz.addWidget(self._criar_cartao_logs())
         raiz.addWidget(self._criar_cartao_geral())
         raiz.addWidget(self._criar_cartao_transparente())
+        raiz.addWidget(self._criar_cartao_servico())
         raiz.addStretch(1)
 
     # -- portas -----------------------------------------------------------------
@@ -327,13 +334,71 @@ class PaginaConfiguracoes(QWidget):
         dica = QLabel(
             "Intercepta as conexões no próprio sistema, inclusive de programas que ignoram a "
             f"configuração de proxy. Exige abrir o {NOME_EXIBICAO} como administrador (Windows) "
-            "ou root (Linux). No Linux usa o nftables; no Windows, o driver WinDivert. Só TCP "
-            "sobre IPv4 é interceptado. "
+            "ou root (Linux). No Linux usa o nftables; no Windows, o driver WinDivert. TCP "
+            "(IPv4 e IPv6) é interceptado; QUIC é bloqueado para os navegadores usarem TCP. "
             "Liga e desliga junto com o motor; com o motor ligado, a mudança vale ao salvar."
         )
         dica.setWordWrap(True)
         dica.setObjectName("DicaCartao")
         layout.addWidget(dica)
+
+        self.caixa_dns = QCheckBox("Resolver nomes pelo proxy (DNS pelo proxy)")
+        self.caixa_dns.setChecked(preferencias.dns_pelo_proxy)
+        layout.addWidget(caixa_com_quebra(self.caixa_dns))
+        form_dns = QFormLayout()
+        self.campo_dns_excecoes = QLineEdit(preferencias.dns_excecoes)
+        self.campo_dns_excecoes.setToolTip("Nomes resolvidos pelo DNS normal, separados por ponto e vírgula")
+        self.campo_dns_servidores = QLineEdit(preferencias.dns_servidores)
+        self.campo_dns_servidores.setPlaceholderText("automático (os do sistema)")
+        self.campo_dns_servidores.setToolTip(
+            "Servidores DNS reais usados pelo próprio Veredo e para as exceções, separados por "
+            "ponto e vírgula (ex.: 192.168.1.1; 1.1.1.1). Porta opcional: 192.168.1.1:5353")
+        self.campo_porta_dns = QSpinBox()
+        self.campo_porta_dns.setRange(1024, 65535)
+        self.campo_porta_dns.setValue(preferencias.porta_dns)
+        form_dns.addRow("Não resolver pelo proxy", self.campo_dns_excecoes)
+        form_dns.addRow("Servidores DNS reais", self.campo_dns_servidores)
+        form_dns.addRow("Porta do DNS local", self.campo_porta_dns)
+        layout.addLayout(form_dns)
+
+        dica_dns = QLabel(
+            "Os programas recebem endereços falsos (198.18.x.x) e o nome do site vai para o proxy, "
+            "que faz a consulta DNS do lado dele. Assim as regras por domínio valem para qualquer "
+            "programa e o seu provedor não vê quais sites você acessa pelo proxy."
+        )
+        dica_dns.setWordWrap(True)
+        dica_dns.setObjectName("DicaCartao")
+        layout.addWidget(dica_dns)
+
+        self.caixa_vazamento = QCheckBox("Prevenção de vazamento de DNS e IP")
+        self.caixa_vazamento.setChecked(preferencias.prevenir_vazamento)
+        layout.addWidget(caixa_com_quebra(self.caixa_vazamento))
+        dica_vazamento = QLabel(
+            "Liga o DNS pelo proxy, responde vazio às consultas DNS que não são de endereço "
+            "(MX, TXT, SRV...) e bloqueia todo o UDP de saída, o que impede o WebRTC de revelar "
+            "o seu IP. Jogos, chamadas de voz e VPNs que usam UDP deixam de funcionar."
+        )
+        dica_vazamento.setWordWrap(True)
+        dica_vazamento.setObjectName("DicaCartao")
+        layout.addWidget(dica_vazamento)
+
+        self.caixa_udp = QCheckBox("Encaminhar UDP pelas regras (jogos, chamadas, QUIC)")
+        self.caixa_udp.setChecked(preferencias.udp_pelas_regras)
+        layout.addWidget(caixa_com_quebra(self.caixa_udp))
+        dica_udp = QLabel(
+            "Cada fluxo UDP segue as regras como uma conexão: direto, bloqueado ou por um proxy "
+            "SOCKS5 que aceite UDP (HTTP, HTTPS e SOCKS4 não transportam UDP). Com a prevenção "
+            "de vazamento, o UDP que iria direto é bloqueado. Desligado, só o QUIC é bloqueado."
+        )
+        dica_udp.setWordWrap(True)
+        dica_udp.setObjectName("DicaCartao")
+        layout.addWidget(dica_udp)
+
+        self._widgets_dns = [self.caixa_dns, self.campo_dns_excecoes, self.campo_dns_servidores,
+                             self.campo_porta_dns, self.caixa_vazamento, self.caixa_udp]
+        self.caixa_transparente.toggled.connect(self._atualizar_widgets_dns)
+        self.caixa_vazamento.toggled.connect(self._atualizar_widgets_dns)
+        self._atualizar_widgets_dns()
 
         botao_salvar = QPushButton("Salvar")
         botao_salvar.setObjectName("BotaoPrincipal")
@@ -348,18 +413,111 @@ class PaginaConfiguracoes(QWidget):
         layout.addWidget(self.rotulo_transparente)
         return quadro
 
+    def _atualizar_widgets_dns(self) -> None:
+        transparente = self.caixa_transparente.isChecked()
+        for widget in self._widgets_dns:
+            widget.setEnabled(transparente)
+        if self.caixa_vazamento.isChecked():
+            # A prevenção de vazamento sempre usa o DNS pelo proxy.
+            self.caixa_dns.setChecked(True)
+            self.caixa_dns.setEnabled(False)
+
+    def _carregar_transparente(self) -> None:
+        preferencias = self.ctx.configuracao.preferencias
+        self.caixa_transparente.setChecked(preferencias.modo_transparente_ativo)
+        self.campo_porta_transparente.setValue(preferencias.porta_transparente)
+        self.caixa_vazamento.setChecked(preferencias.prevenir_vazamento)
+        self.caixa_dns.setChecked(preferencias.dns_pelo_proxy)
+        self.campo_dns_excecoes.setText(preferencias.dns_excecoes)
+        self.campo_dns_servidores.setText(preferencias.dns_servidores)
+        self.campo_porta_dns.setValue(preferencias.porta_dns)
+        self.caixa_udp.setChecked(preferencias.udp_pelas_regras)
+        self._atualizar_widgets_dns()
+
     def _ao_salvar_transparente(self) -> None:
         preferencias = self.ctx.configuracao.preferencias
         preferencias.modo_transparente_ativo = self.caixa_transparente.isChecked()
         preferencias.porta_transparente = self.campo_porta_transparente.value()
+        preferencias.prevenir_vazamento = self.caixa_vazamento.isChecked()
+        preferencias.dns_pelo_proxy = self.caixa_dns.isChecked() or preferencias.prevenir_vazamento
+        preferencias.dns_excecoes = self.campo_dns_excecoes.text().strip()
+        preferencias.dns_servidores = self.campo_dns_servidores.text().strip()
+        preferencias.porta_dns = self.campo_porta_dns.value()
+        preferencias.udp_pelas_regras = self.caixa_udp.isChecked()
 
         if self.ctx.motor.em_execucao():
             ok, mensagem = self.ctx.aplicar_ao_vivo()
             # Em caso de falha os valores anteriores foram restaurados.
-            self.caixa_transparente.setChecked(preferencias.modo_transparente_ativo)
-            self.campo_porta_transparente.setValue(preferencias.porta_transparente)
+            self._carregar_transparente()
             self.rotulo_transparente.setText(mensagem)
         else:
             self.ctx.aplicar_mudancas()
             self.rotulo_transparente.setText(
                 "Configurações salvas. Serão aplicadas quando você iniciar o motor no Dashboard.")
+
+    # -- serviço do sistema -------------------------------------------------------
+
+    def _criar_cartao_servico(self) -> QFrame:
+        quadro, layout = _cartao("Serviço do sistema")
+        dica = QLabel(
+            f"Roda o motor como serviço, iniciado com o computador e antes de qualquer login, "
+            f"sem a janela aberta. A janela passa a controlar o serviço e envia a ele a "
+            f"configuração (inclusive as senhas, guardadas num arquivo que só o administrador "
+            f"lê). Fechar o {NOME_EXIBICAO} não para o serviço. Pede permissão de administrador."
+        )
+        dica.setWordWrap(True)
+        dica.setObjectName("DicaCartao")
+        layout.addWidget(dica)
+
+        self.rotulo_servico = QLabel()
+        self.rotulo_servico.setWordWrap(True)
+        layout.addWidget(self.rotulo_servico)
+
+        self.botao_instalar_servico = QPushButton("Instalar serviço")
+        self.botao_instalar_servico.setObjectName("BotaoPrincipal")
+        self.botao_instalar_servico.clicked.connect(lambda: self._executar_servico(True))
+        self.botao_remover_servico = QPushButton("Remover serviço")
+        self.botao_remover_servico.clicked.connect(lambda: self._executar_servico(False))
+        linha = QHBoxLayout()
+        linha.addStretch(1)
+        linha.addWidget(self.botao_remover_servico)
+        linha.addWidget(self.botao_instalar_servico)
+        layout.addLayout(linha)
+
+        self._servico_concluido.connect(self._ao_concluir_servico)
+        self._atualizar_servico()
+        return quadro
+
+    def _atualizar_servico(self, mensagem: str = "") -> None:
+        usando = self.ctx.usando_servico
+        self.botao_instalar_servico.setEnabled(not usando)
+        self.botao_remover_servico.setEnabled(usando)
+        estado = ("Esta janela está controlando o serviço do sistema." if usando
+                  else "O motor roda dentro desta janela.")
+        self.rotulo_servico.setText(f"{mensagem}\n{estado}" if mensagem else estado)
+
+    def _executar_servico(self, instalar: bool) -> None:
+        self.botao_instalar_servico.setEnabled(False)
+        self.botao_remover_servico.setEnabled(False)
+        self.rotulo_servico.setText("Aguardando a permissão de administrador...")
+
+        def trabalho() -> None:
+            ok, mensagem = servico.executar_como_administrador(
+                "--instalar-servico" if instalar else "--remover-servico")
+            if ok and instalar and not servico.esperar_servico():
+                ok, mensagem = False, "O serviço foi instalado mas não respondeu ao canal de controle."
+            self._servico_concluido.emit(instalar, ok, mensagem)
+
+        threading.Thread(target=trabalho, daemon=True).start()
+
+    def _ao_concluir_servico(self, instalar: bool, ok: bool, mensagem: str) -> None:
+        if ok:
+            if instalar:
+                self.ctx.conectar_servico()
+                mensagem = mensagem or "Serviço instalado e em execução."
+            else:
+                self.ctx.desconectar_servico()
+                mensagem = mensagem or "Serviço removido."
+        else:
+            mensagem = f"Falhou: {mensagem}"
+        self._atualizar_servico(mensagem)

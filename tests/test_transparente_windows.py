@@ -1,4 +1,6 @@
 """Tradução de pacotes do modo transparente no Windows, com pacotes falsos (sem pydivert)."""
+import pytest
+
 from proxy_manager.nucleo.transparente.windows_windivert import ModoTransparenteWindows
 
 
@@ -147,3 +149,103 @@ def test_iniciar_informa_falta_do_pydivert(monkeypatch):
 
     assert ok is False
     assert "pydivert" in mensagem.lower()
+
+
+class _UdpFalso:
+    def __init__(self, src_port, dst_port):
+        self.src_port = src_port
+        self.dst_port = dst_port
+
+
+class _PacoteUdpFalso:
+    def __init__(self, is_outbound, src_addr, dst_addr, udp):
+        self.is_outbound = is_outbound
+        self.src_addr = src_addr
+        self.dst_addr = dst_addr
+        self.udp = udp
+
+
+def test_consulta_dns_vai_ao_servidor_local_e_resposta_volta_com_endereco_original():
+    backend = ModoTransparenteWindows(58095, porta_dns=58053)
+    consulta = _PacoteUdpFalso(True, "192.168.1.50", "192.168.1.1", _UdpFalso(61000, 53))
+    assert backend._traduzir_udp(consulta) is True
+    assert (consulta.dst_addr, consulta.udp.dst_port) == ("127.0.0.1", 58053)
+
+    resposta = _PacoteUdpFalso(True, "127.0.0.1", "192.168.1.50", _UdpFalso(58053, 61000))
+    assert backend._traduzir_udp(resposta) is True
+    assert (resposta.src_addr, resposta.udp.src_port) == ("192.168.1.1", 53)
+
+
+def test_dns_ipv6_vai_para_o_loopback_ipv6():
+    backend = ModoTransparenteWindows(58095, porta_dns=58053)
+    consulta = _PacoteUdpFalso(True, "2001:db8::50", "2001:db8::1", _UdpFalso(61001, 53))
+    backend._traduzir_udp(consulta)
+    assert consulta.dst_addr == "::1"
+
+
+def test_quic_e_descartado_e_dns_do_proprio_motor_passa():
+    from proxy_manager.nucleo import rede
+
+    backend = ModoTransparenteWindows(58095, porta_dns=58053)
+    assert backend._traduzir_udp(_PacoteUdpFalso(True, "192.168.1.50", "142.250.0.1", _UdpFalso(62000, 443))) is None
+    rede.reservar_porta(62001)
+    try:
+        proprio = _PacoteUdpFalso(True, "192.168.1.50", "192.168.1.1", _UdpFalso(62001, 53))
+        assert backend._traduzir_udp(proprio) is False
+        assert proprio.dst_addr == "192.168.1.1"
+    finally:
+        rede.liberar_porta(62001)
+
+
+def test_filtro_captura_so_o_necessario():
+    simples = ModoTransparenteWindows(58095).filtro()
+    assert "udp.DstPort == 443" in simples and "udp.DstPort == 53" not in simples
+    com_dns = ModoTransparenteWindows(58095, porta_dns=58053).filtro()
+    assert "udp.DstPort == 53" in com_dns and "udp.SrcPort == 58053" in com_dns
+    tudo = ModoTransparenteWindows(58095, porta_dns=58053, bloquear_todo_udp=True).filtro()
+    assert "udp.DstPort == 443" not in tudo
+
+
+def test_syn_do_proprio_motor_nao_e_capturado():
+    from proxy_manager.nucleo import rede
+
+    backend = ModoTransparenteWindows(porta_transparente=58095)
+    rede.reservar_porta(53300)
+    try:
+        pacote = _PacoteFalso(is_outbound=True, src_addr="192.168.1.50", dst_addr="203.0.113.10",
+                              dst_port=1080, tcp=_TcpFalso(src_port=53300, syn=True))
+        assert backend._traduzir(pacote) is False
+        assert pacote.dst_addr == "203.0.113.10"
+    finally:
+        rede.liberar_porta(53300)
+
+
+def test_udp_pelas_regras_entrega_o_datagrama_ao_motor_e_descarta_o_original():
+    recebidos = []
+    backend = ModoTransparenteWindows(58095, porta_dns=58053, capturar_udp=True)
+    backend.ao_receber_udp = lambda origem, destino, dados, responder: recebidos.append((origem, destino, dados))
+    assert "outbound and !loopback)" in backend.filtro()
+
+    pacote = _PacoteUdpFalso(True, "192.168.1.50", "203.0.113.7", _UdpFalso(50000, 3478))
+    pacote.payload = b"stun"
+    assert backend._traduzir_udp(pacote) is None
+    assert recebidos == [(("192.168.1.50", 50000), ("203.0.113.7", 3478), b"stun")]
+
+    # multicast/broadcast da rede local passam sem ir às regras
+    mdns = _PacoteUdpFalso(True, "192.168.1.50", "224.0.0.251", _UdpFalso(5353, 5353))
+    assert backend._traduzir_udp(mdns) is False
+    # DNS continua indo para o servidor local
+    consulta = _PacoteUdpFalso(True, "192.168.1.50", "192.168.1.1", _UdpFalso(61000, 53))
+    assert backend._traduzir_udp(consulta) is True and consulta.udp.dst_port == 58053
+
+
+def test_pacote_de_resposta_montado_e_valido():
+    pydivert = pytest.importorskip("pydivert")
+    from proxy_manager.nucleo.transparente.windows_windivert import montar_pacote_udp
+
+    for origem, destino in ((("203.0.113.7", 3478), ("192.168.1.50", 50000)),
+                            (("2001:db8::7", 3478), ("2001:db8::50", 50000))):
+        pacote = pydivert.Packet(montar_pacote_udp(origem, destino, b"resposta"), None, pydivert.Direction.INBOUND)
+        assert (pacote.src_addr, pacote.src_port) == origem
+        assert (pacote.dst_addr, pacote.dst_port) == destino
+        assert bytes(pacote.payload) == b"resposta"
