@@ -9,7 +9,8 @@ import threading
 import time
 from typing import Callable, Optional, Protocol
 
-from . import processos, proxy_http, rede, socks5, verificacao_ip
+from . import cliente_proxy, processos, proxy_http, rede, socks5, verificacao_ip
+from .cliente_proxy import Rota
 from .configuracao import Configuracao, PerfilProxy
 from .integracao_sistema import gerar_script_pac, iniciar_servidor_pac
 from .registro import EntradaLog, Registro
@@ -81,7 +82,7 @@ class MotorProxy:
         self._ip_saida_por_perfil: dict[str, str] = {}
         # Endereço (chave do cache) de cada perfil na última revisão, para notar edições.
         self._chaves_perfis: dict[str, str] = {}
-        # id da entrada -> (id do perfil, chave do perfil ao conectar, escritores do túnel).
+        # id da entrada -> (id do perfil ou cadeia, chave da rota ao conectar, escritores do túnel).
         self._tuneis_proxy: dict[str, tuple[str, str, tuple[asyncio.StreamWriter, ...]]] = {}
 
         self.conexoes_ativas = 0
@@ -112,9 +113,15 @@ class MotorProxy:
         consultado na hora, sem esperar a próxima conexão."""
         perfis = {perfil.id: perfil for perfil in self.configuracao.proxies}
         chaves = {id_perfil: self._chave_cache_ip(perfil) for id_perfil, perfil in perfis.items()}
+        chaves_rotas = {id_perfil: self._chave_rota(cliente_proxy.rota_do_perfil(perfil))
+                        for id_perfil, perfil in perfis.items()}
+        for cadeia in self.configuracao.cadeias:
+            rota = self._rota_da_cadeia(cadeia.nome)
+            if rota is not None:
+                chaves_rotas[cadeia.id] = self._chave_rota(rota)
 
-        for id_entrada, (id_perfil, chave, escritores) in list(self._tuneis_proxy.items()):
-            if chaves.get(id_perfil) != chave:
+        for id_entrada, (id_rota, chave, escritores) in list(self._tuneis_proxy.items()):
+            if chaves_rotas.get(id_rota) != chave:
                 del self._tuneis_proxy[id_entrada]
                 for escritor in escritores:
                     try:
@@ -351,10 +358,24 @@ class MotorProxy:
 
     # -- decisão de roteamento ------------------------------------------------------
 
-    def _resolver_perfil(self, resultado: Resultado) -> Optional[PerfilProxy]:
+    def _rota_da_cadeia(self, nome: str) -> Optional[Rota]:
+        cadeia = self.configuracao.buscar_cadeia(nome)
+        if cadeia is None or not cadeia.ativo:
+            return None
+        return Rota(id=cadeia.id, nome=cadeia.nome, perfis=self.configuracao.perfis_da_cadeia(cadeia),
+                    tipo=cadeia.tipo, timeout=float(cadeia.timeout), eh_cadeia=True)
+
+    def _resolver_rota(self, resultado: Resultado) -> Optional[Rota]:
+        if resultado.nome_cadeia:
+            return self._rota_da_cadeia(resultado.nome_cadeia)
         if resultado.nome_proxy:
-            return self.configuracao.buscar_proxy(resultado.nome_proxy)
-        return self.configuracao.proxy_padrao()
+            perfil = self.configuracao.buscar_proxy(resultado.nome_proxy)
+        else:
+            perfil = self.configuracao.proxy_padrao()
+        return cliente_proxy.rota_do_perfil(perfil) if perfil else None
+
+    def _chave_rota(self, rota: Rota) -> str:
+        return f"{rota.tipo}|" + "|".join(self._chave_cache_ip(p) for p in rota.perfis)
 
     def _portas_locais(self) -> set[int]:
         prefs = self.configuracao.preferencias
@@ -391,7 +412,7 @@ class MotorProxy:
     async def _preparar(self, host_destino: str, porta_destino: int, ip_origem: str, porta_origem: int,
                         porta_escuta: int, protocolo: str, host_regras: Optional[str] = None,
                         destino_original: Optional[tuple[str, int]] = None,
-                        ) -> tuple[Resultado, Optional[PerfilProxy], EntradaLog]:
+                        ) -> tuple[Resultado, Optional[Rota], EntradaLog]:
         """Identifica o processo, avalia as regras e registra a conexão.
 
         No modo transparente `host_destino` é sempre o IP original; `host_regras` traz o domínio
@@ -404,32 +425,37 @@ class MotorProxy:
                                                  acao_padrao=self.configuracao.preferencias.acao_padrao,
                                                  porta=porta_destino)
         resultado = self._evitar_loop(resultado, host_destino, porta_destino)
-        perfil: Optional[PerfilProxy] = None
+        rota: Optional[Rota] = None
         rotulo_proxy = ""
-        ip_proxy = ""
-        verificar_ip_saida = False
         if resultado.tipo_acao == "proxy":
-            perfil = self._resolver_perfil(resultado)
-            rotulo_proxy = perfil.nome if perfil else "(nenhum proxy configurado)"
-            if perfil:
-                em_cache = self._cache_ip_saida.get(self._chave_cache_ip(perfil))
-                if em_cache:
-                    ip_proxy = em_cache[1]
-                    verificar_ip_saida = time.time() - em_cache[0] >= VALIDADE_CACHE_IP_SAIDA
-                else:
-                    verificar_ip_saida = True
+            rota = self._resolver_rota(resultado)
+            if rota is not None:
+                rotulo_proxy = rota.nome
+            elif resultado.nome_cadeia:
+                rotulo_proxy = f"(cadeia '{resultado.nome_cadeia}' não encontrada)"
+            else:
+                rotulo_proxy = "(nenhum proxy configurado)"
 
         entrada = self.registro.adicionar(EntradaLog(
             pid=proc.pid, nome_processo=proc.nome, caminho_processo=proc.caminho, protocolo=protocolo,
             host_destino=host_para_regras, ip_destino=ip_literal or "", porta_destino=porta_destino,
             regra_aplicada=self._rotulo_regra(resultado), acao=resultado.tipo_acao,
-            proxy_usado=rotulo_proxy, ip_proxy=ip_proxy,
+            proxy_usado=rotulo_proxy,
         ))
         if ip_literal is None:
             self._em_segundo_plano(self._resolver_ip_destino(entrada.id, host_destino))
-        if perfil is not None and verificar_ip_saida:
-            self._em_segundo_plano(self._atualizar_ip_saida(perfil, entrada.id, tinha_valor=bool(ip_proxy)))
-        return resultado, perfil, entrada
+        if rota is not None and not rota.eh_cadeia:
+            self._anotar_ip_saida(rota.perfis[0], entrada)
+        return resultado, rota, entrada
+
+    def _anotar_ip_saida(self, perfil: PerfilProxy, entrada: EntradaLog) -> None:
+        """Põe na entrada o IP de saída em cache e, se ele estiver vencido, consulta de novo."""
+        em_cache = self._cache_ip_saida.get(self._chave_cache_ip(perfil))
+        if em_cache:
+            self.registro.atualizar(entrada.id, ip_proxy=em_cache[1])
+            if time.time() - em_cache[0] < VALIDADE_CACHE_IP_SAIDA:
+                return
+        self._em_segundo_plano(self._atualizar_ip_saida(perfil, entrada.id, tinha_valor=bool(em_cache)))
 
     def _em_segundo_plano(self, corrotina) -> None:
         tarefa = asyncio.ensure_future(corrotina)
@@ -477,14 +503,18 @@ class MotorProxy:
             # "?" indica que a verificação falhou; um valor antigo em cache é mantido.
             self.registro.atualizar(id_entrada, ip_proxy="?")
 
-    async def _conectar_destino(self, resultado: Resultado, perfil: Optional[PerfilProxy],
-                                host: str, porta: int):
+    async def _conectar_destino(self, resultado: Resultado, rota: Optional[Rota], host: str, porta: int,
+                                entrada: EntradaLog):
         if resultado.tipo_acao == "direct":
             return await rede.abrir_conexao(host, porta)
-        if perfil is None:
+        if rota is None:
             raise RuntimeError("nenhum perfil de proxy disponível para esta regra")
-        conectar = socks5.conectar_via_socks5 if perfil.type == "socks5" else proxy_http.conectar_via_http
-        return await conectar(perfil.host, perfil.port, host, porta, perfil.usuario, perfil.senha)
+        leitor, escritor, usado = await cliente_proxy.conectar_rota(rota, host, porta)
+        if rota.eh_cadeia and usado is not None:
+            # Redundância/balanceamento: registra qual perfil da cadeia atendeu.
+            self.registro.atualizar(entrada.id, proxy_usado=f"{rota.nome} → {usado.nome}")
+            self._anotar_ip_saida(usado, entrada)
+        return leitor, escritor
 
     # -- atendimento das conexões ----------------------------------------------------
 
@@ -497,7 +527,7 @@ class MotorProxy:
             escritor.close()
             return
 
-        resultado, perfil, entrada = await self._preparar(
+        resultado, rota, entrada = await self._preparar(
             pedido.host, pedido.port, origem[0], origem[1], self.configuracao.preferencias.porta_socks, "socks5")
 
         if resultado.tipo_acao == "block":
@@ -507,7 +537,8 @@ class MotorProxy:
             return
 
         try:
-            leitor_destino, escritor_destino = await self._conectar_destino(resultado, perfil, pedido.host, pedido.port)
+            leitor_destino, escritor_destino = await self._conectar_destino(
+                resultado, rota, pedido.host, pedido.port, entrada)
         except Exception as exc:
             await socks5.responder_cliente(escritor, socks5.REP_HOST_UNREACHABLE)
             escritor.close()
@@ -515,7 +546,7 @@ class MotorProxy:
             return
 
         await socks5.responder_cliente(escritor, socks5.REP_SUCCESS)
-        await self._tunelar(leitor, escritor, leitor_destino, escritor_destino, resultado, perfil, entrada, inicio)
+        await self._tunelar(leitor, escritor, leitor_destino, escritor_destino, resultado, rota, entrada, inicio)
 
     async def _atender_http(self, leitor: asyncio.StreamReader, escritor: asyncio.StreamWriter) -> None:
         inicio = time.monotonic()
@@ -527,7 +558,7 @@ class MotorProxy:
             escritor.close()
             return
 
-        resultado, perfil, entrada = await self._preparar(
+        resultado, rota, entrada = await self._preparar(
             host, porta, origem[0], origem[1], self.configuracao.preferencias.porta_http, "http")
         eh_connect = cabecalho.metodo == "CONNECT"
 
@@ -536,15 +567,12 @@ class MotorProxy:
             self._finalizar_bloqueada(entrada, inicio, resultado)
             return
 
-        via_proxy_http = resultado.tipo_acao == "proxy" and perfil is not None and perfil.type == "http"
         try:
-            leitor_destino, escritor_destino = await self._conectar_destino(resultado, perfil, host, porta)
+            leitor_destino, escritor_destino = await self._conectar_destino(resultado, rota, host, porta, entrada)
             if not eh_connect:
-                if via_proxy_http:
-                    auth = proxy_http.auth_basica(perfil.usuario, perfil.senha) if perfil.usuario else None
-                    escritor_destino.write(proxy_http.requisicao_forma_absoluta(cabecalho, auth))
-                else:
-                    escritor_destino.write(proxy_http.requisicao_forma_origem(cabecalho))
+                # Mesmo via proxy o túnel já termina no servidor de destino, que recebe a forma
+                # de origem; credenciais do proxy nunca vão nesta requisição.
+                escritor_destino.write(proxy_http.requisicao_forma_origem(cabecalho))
                 await escritor_destino.drain()
         except Exception as exc:
             await self._erro_http(escritor, 502, "Bad Gateway")
@@ -554,7 +582,7 @@ class MotorProxy:
         if eh_connect:
             escritor.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
             await escritor.drain()
-        await self._tunelar(leitor, escritor, leitor_destino, escritor_destino, resultado, perfil, entrada, inicio)
+        await self._tunelar(leitor, escritor, leitor_destino, escritor_destino, resultado, rota, entrada, inicio)
 
     async def _atender_transparente(self, leitor: asyncio.StreamReader, escritor: asyncio.StreamWriter) -> None:
         inicio = time.monotonic()
@@ -580,7 +608,7 @@ class MotorProxy:
         elif prefixo and porta == 80:
             host_detectado = inspecao.extrair_host_http(prefixo)
 
-        resultado, perfil, entrada = await self._preparar(
+        resultado, rota, entrada = await self._preparar(
             host, porta, origem[0], origem[1], self.configuracao.preferencias.porta_transparente,
             "transparente", host_regras=host_detectado, destino_original=destino)
 
@@ -591,7 +619,7 @@ class MotorProxy:
 
         try:
             # Conecta ao IP original para não depender de uma nova resolução de DNS.
-            leitor_destino, escritor_destino = await self._conectar_destino(resultado, perfil, host, porta)
+            leitor_destino, escritor_destino = await self._conectar_destino(resultado, rota, host, porta, entrada)
             if prefixo:
                 escritor_destino.write(prefixo)
                 await escritor_destino.drain()
@@ -602,7 +630,7 @@ class MotorProxy:
 
         if prefixo:
             self._contar(len(prefixo), enviado=True, via_proxy=resultado.tipo_acao == "proxy")
-        await self._tunelar(leitor, escritor, leitor_destino, escritor_destino, resultado, perfil, entrada, inicio,
+        await self._tunelar(leitor, escritor, leitor_destino, escritor_destino, resultado, rota, entrada, inicio,
                             ja_enviados=len(prefixo))
 
     # -- utilidades -------------------------------------------------------------------
@@ -640,12 +668,12 @@ class MotorProxy:
 
     async def _tunelar(self, leitor: asyncio.StreamReader, escritor: asyncio.StreamWriter,
                        leitor_destino: asyncio.StreamReader, escritor_destino: asyncio.StreamWriter,
-                       resultado: Resultado, perfil: Optional[PerfilProxy], entrada: EntradaLog, inicio: float,
+                       resultado: Resultado, rota: Optional[Rota], entrada: EntradaLog, inicio: float,
                        ja_enviados: int = 0) -> None:
         self.conexoes_ativas += 1
         self._escritores_ativos.update((escritor, escritor_destino))
-        if resultado.tipo_acao == "proxy" and perfil is not None:
-            self._tuneis_proxy[entrada.id] = (perfil.id, self._chave_cache_ip(perfil), (escritor, escritor_destino))
+        if resultado.tipo_acao == "proxy" and rota is not None:
+            self._tuneis_proxy[entrada.id] = (rota.id, self._chave_rota(rota), (escritor, escritor_destino))
         try:
             enviados, recebidos = await self._encaminhar(
                 leitor, escritor, leitor_destino, escritor_destino, via_proxy=resultado.tipo_acao == "proxy")

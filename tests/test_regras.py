@@ -169,7 +169,7 @@ def test_portas_invalidas_nunca_casam():
 
 
 def test_porta_volta_ao_texto():
-    texto = "apps: *\n*.site.com:80,443 +direct\n[::1]:8080 +block\n"
+    texto = "*.site.com:80,443 +direct\n[::1]:8080 +block\n"
     assert ConjuntoRegras.interpretar(texto).para_texto() == texto
 
 

@@ -27,7 +27,8 @@ class PaginaProxies(QWidget):
 
         titulo = QLabel("Perfis de proxy")
         titulo.setObjectName("TituloSecao")
-        subtitulo = QLabel("Cadastre um ou mais proxies (SOCKS5 ou HTTP) para usar nas regras de roteamento.")
+        subtitulo = QLabel("Cadastre um ou mais proxies (SOCKS5, SOCKS4, HTTP ou HTTPS) para usar nas regras "
+                           "de roteamento. O nome não pode ter espaços, porque vai no texto das regras.")
         subtitulo.setObjectName("SubtituloPagina")
         subtitulo.setWordWrap(True)
         raiz.addWidget(titulo)
@@ -65,7 +66,9 @@ class PaginaProxies(QWidget):
         self.campo_nome = QLineEdit()
         self.combo_tipo = QComboBox()
         self.combo_tipo.addItem("SOCKS5", "socks5")
-        self.combo_tipo.addItem("HTTP / HTTPS (CONNECT)", "http")
+        self.combo_tipo.addItem("SOCKS4 / 4A", "socks4")
+        self.combo_tipo.addItem("HTTP (CONNECT)", "http")
+        self.combo_tipo.addItem("HTTPS (conexão criptografada até o proxy)", "https")
         self.campo_host = QLineEdit()
         self.campo_host.setPlaceholderText("ex.: proxy.minhaempresa.com")
         self.campo_porta = QSpinBox()
@@ -199,7 +202,7 @@ class PaginaProxies(QWidget):
         if self._atual is None:
             return
         perfil = self._atual
-        perfil.nome = self.campo_nome.text().strip() or perfil.nome
+        perfil.nome = self.campo_nome.text().strip().replace(" ", "_") or perfil.nome
         perfil.type = self.combo_tipo.currentData()
         perfil.host = self.campo_host.text().strip()
         perfil.port = self.campo_porta.value()

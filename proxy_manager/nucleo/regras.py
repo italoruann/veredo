@@ -13,7 +13,7 @@ class Regra:
     aplicativos: list[str] = field(default_factory=list)  # vazio = qualquer aplicativo
     alvo: str = ""
     portas: str = ""  # vazio = qualquer porta; senão "443", "80,443" ou "8000-8100"
-    acao: str = "proxy"  # "direct", "block", "proxy" ou "proxy:<nome>"
+    acao: str = "proxy"  # "direct", "block", "proxy", "proxy:<nome>" ou "chain:<nome>"
     ativo: bool = True
     linha: int = 0
     linha_original: str = ""
@@ -33,6 +33,12 @@ class Regra:
     @property
     def nome_proxy(self) -> Optional[str]:
         if self.acao.startswith("proxy:"):
+            return self.acao.split(":", 1)[1]
+        return None
+
+    @property
+    def nome_cadeia(self) -> Optional[str]:
+        if self.acao.startswith("chain:"):
             return self.acao.split(":", 1)[1]
         return None
 
@@ -155,6 +161,7 @@ class Resultado:
     nome_proxy: Optional[str]
     regra: Optional[Regra]
     motivo: str = ""  # decisão tomada fora das regras (ex.: "loop")
+    nome_cadeia: Optional[str] = None
 
 
 class ConjuntoRegras:
@@ -167,7 +174,8 @@ class ConjuntoRegras:
             if (regra.ativo and app_corresponde(regra.aplicativos, nome_app, caminho_app)
                 and porta_corresponde(regra.portas, porta)
                 and padrao_corresponde(regra.alvo, host, ip)):
-                return Resultado(tipo_acao=regra.tipo_acao, nome_proxy=regra.nome_proxy, regra=regra)
+                return Resultado(tipo_acao=regra.tipo_acao, nome_proxy=regra.nome_proxy, regra=regra,
+                                 nome_cadeia=regra.nome_cadeia)
         if acao_padrao not in ("direct", "block"):
             acao_padrao = "direct"
         return Resultado(tipo_acao=acao_padrao, nome_proxy=None, regra=None)

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import struct
 from dataclasses import dataclass
 
@@ -14,6 +15,7 @@ ATYP_DOMAIN = 0x03
 ATYP_IPV6 = 0x04
 
 CMD_CONNECT = 0x01
+CMD_UDP_ASSOCIATE = 0x03
 
 REP_SUCCESS = 0x00
 REP_GENERAL_FAILURE = 0x01
@@ -84,55 +86,78 @@ async def responder_cliente(escritor: asyncio.StreamWriter, rep: int,
     await escritor.drain()
 
 
+def endereco_socks5(host: str) -> bytes:
+    """ATYP + endereço: IPv4 e IPv6 literais vão como endereço, o resto como nome (DNS remoto)."""
+    try:
+        ip = ipaddress.ip_address(host.strip("[]"))
+    except ValueError:
+        bruto = host.encode("utf-8")
+        if len(bruto) > 255:
+            raise ErroSocks5("hostname de destino muito longo para SOCKS5")
+        return bytes([ATYP_DOMAIN, len(bruto)]) + bruto
+    if ip.version == 4:
+        return bytes([ATYP_IPV4]) + ip.packed
+    return bytes([ATYP_IPV6]) + ip.packed
+
+
+async def negociar_cliente(leitor: asyncio.StreamReader, escritor: asyncio.StreamWriter,
+                           host_destino: str, porta_destino: int, usuario: str = "", senha: str = "",
+                           timeout: float = 15.0, comando: int = CMD_CONNECT) -> tuple[str, int]:
+    """Negocia um pedido SOCKS5 sobre uma conexão já aberta com o proxy.
+
+    Devolve o endereço vinculado informado pelo proxy (usado pelo UDP ASSOCIATE)."""
+    metodos = bytes([0x00, 0x02]) if usuario else bytes([0x00])
+    escritor.write(bytes([SOCKS_VERSION, len(metodos)]) + metodos)
+    await escritor.drain()
+    escolhido = await asyncio.wait_for(leitor.readexactly(2), timeout=timeout)
+    if escolhido[0] != SOCKS_VERSION:
+        raise ErroSocks5("o proxy respondeu com uma versão inválida")
+    metodo = escolhido[1]
+
+    if metodo == 0x02:
+        nome_usuario = usuario.encode("utf-8")[:255]
+        senha_bytes = senha.encode("utf-8")[:255]
+        escritor.write(bytes([0x01, len(nome_usuario)]) + nome_usuario + bytes([len(senha_bytes)]) + senha_bytes)
+        await escritor.drain()
+        resposta_auth = await asyncio.wait_for(leitor.readexactly(2), timeout=timeout)
+        if resposta_auth[1] != 0x00:
+            raise ErroSocks5("usuário ou senha recusados pelo proxy")
+    elif metodo == 0xFF:
+        raise ErroSocks5("o proxy não aceitou nenhum método de autenticação")
+    elif metodo != 0x00:
+        raise ErroSocks5(f"o proxy escolheu um método de autenticação desconhecido ({metodo})")
+
+    escritor.write(bytes([SOCKS_VERSION, comando, 0x00]) + endereco_socks5(host_destino) +
+                   struct.pack("!H", porta_destino))
+    await escritor.drain()
+
+    cabecalho_resposta = await asyncio.wait_for(leitor.readexactly(4), timeout=timeout)
+    rep = cabecalho_resposta[1]
+    atyp = cabecalho_resposta[3]
+    if atyp == ATYP_IPV4:
+        host_vinculo = str(ipaddress.IPv4Address(await leitor.readexactly(4)))
+    elif atyp == ATYP_DOMAIN:
+        tamanho = (await leitor.readexactly(1))[0]
+        host_vinculo = (await leitor.readexactly(tamanho)).decode("utf-8", errors="replace")
+    elif atyp == ATYP_IPV6:
+        host_vinculo = str(ipaddress.IPv6Address(await leitor.readexactly(16)))
+    else:
+        raise ErroSocks5(f"o proxy respondeu com um tipo de endereço inválido ({atyp})")
+    porta_vinculo = struct.unpack("!H", await leitor.readexactly(2))[0]
+
+    if rep != REP_SUCCESS:
+        raise ErroSocks5(f"o proxy recusou a conexão (código {rep})")
+    return host_vinculo, porta_vinculo
+
+
 async def conectar_via_socks5(host: str, port: int, host_destino: str, porta_destino: int,
                               usuario: str = "", senha: str = "",
                               timeout: float = 15.0) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
     """Conecta ao proxy SOCKS5 e abre um túnel até o destino."""
     leitor, escritor = await rede.abrir_conexao(host, port, timeout=timeout)
     try:
-        metodos = bytes([0x00, 0x02]) if usuario else bytes([0x00])
-        escritor.write(bytes([SOCKS_VERSION, len(metodos)]) + metodos)
-        await escritor.drain()
-        escolhido = await asyncio.wait_for(leitor.readexactly(2), timeout=timeout)
-        if escolhido[0] != SOCKS_VERSION:
-            raise ErroSocks5("o proxy respondeu com uma versão inválida")
-        metodo = escolhido[1]
-
-        if metodo == 0x02:
-            nome_usuario = usuario.encode("utf-8")[:255]
-            senha_bytes = senha.encode("utf-8")[:255]
-            escritor.write(bytes([0x01, len(nome_usuario)]) + nome_usuario + bytes([len(senha_bytes)]) + senha_bytes)
-            await escritor.drain()
-            resposta_auth = await asyncio.wait_for(leitor.readexactly(2), timeout=timeout)
-            if resposta_auth[1] != 0x00:
-                raise ErroSocks5("usuário ou senha recusados pelo proxy")
-        elif metodo == 0xFF:
-            raise ErroSocks5("o proxy não aceitou nenhum método de autenticação")
-
-        bytes_destino = host_destino.encode("utf-8")
-        if len(bytes_destino) > 255:
-            raise ErroSocks5("hostname de destino muito longo para SOCKS5")
-        requisicao = bytes([SOCKS_VERSION, CMD_CONNECT, 0x00, ATYP_DOMAIN, len(bytes_destino)]) + \
-            bytes_destino + struct.pack("!H", porta_destino)
-        escritor.write(requisicao)
-        await escritor.drain()
-
-        cabecalho_resposta = await asyncio.wait_for(leitor.readexactly(4), timeout=timeout)
-        rep = cabecalho_resposta[1]
-        atyp = cabecalho_resposta[3]
-        if atyp == ATYP_IPV4:
-            await leitor.readexactly(4)
-        elif atyp == ATYP_DOMAIN:
-            tamanho = (await leitor.readexactly(1))[0]
-            await leitor.readexactly(tamanho)
-        elif atyp == ATYP_IPV6:
-            await leitor.readexactly(16)
-        await leitor.readexactly(2)
-
-        if rep != REP_SUCCESS:
-            raise ErroSocks5(f"o proxy recusou a conexão (código {rep})")
-
+        await negociar_cliente(leitor, escritor, host_destino, porta_destino, usuario, senha, timeout)
         return leitor, escritor
-    except Exception:
+    except BaseException:
         escritor.close()
         raise

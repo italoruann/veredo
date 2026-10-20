@@ -33,6 +33,7 @@ TEXTO_REGRAS_PADRAO = """\
 #   *.exemplo.com                  sem sufixo: vai pelo proxy padrão
 #   *.exemplo.com +direct          conexão direta
 #   *.exemplo.com +proxy:Nome      usa um perfil de proxy específico
+#   *.exemplo.com +chain:Nome      usa uma cadeia de proxies
 #   *.exemplo.com +block           bloqueia
 #   *.exemplo.com:443              só na porta 443 (também 80,443 ou 8000-8100)
 #   10.0.0.1-10.0.0.50 +direct     faixa de IPs
@@ -66,7 +67,7 @@ def _filtrar_campos(classe, dados: dict[str, Any]) -> dict[str, Any]:
 class PerfilProxy:
     id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
     nome: str = "Meu Proxy"
-    type: str = "socks5"  # "socks5" ou "http"
+    type: str = "socks5"  # "socks5", "socks4", "http" ou "https"
     host: str = ""
     port: int = 1080
     usuario: str = ""
@@ -80,6 +81,31 @@ class PerfilProxy:
     @staticmethod
     def de_dict(dados: dict[str, Any]) -> PerfilProxy:
         return PerfilProxy(**_filtrar_campos(PerfilProxy, dados))
+
+
+TIPOS_CADEIA = ("simples", "redundancia", "balanceamento")
+
+
+@dataclass
+class CadeiaProxy:
+    """Vários perfis usados juntos.
+
+    simples: um túnel dentro do outro, na ordem (o último proxy é o que acessa o destino).
+    redundancia: tenta um perfil por vez, na ordem, até um conectar.
+    balanceamento: reveza o perfil inicial entre as conexões e tenta os outros se ele falhar."""
+    id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
+    nome: str = "Cadeia"
+    tipo: str = "simples"
+    proxies: list[str] = field(default_factory=list)  # ids dos perfis, em ordem
+    timeout: int = 10  # segundos para desistir de um perfil (redundância e balanceamento)
+    ativo: bool = True
+
+    def para_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @staticmethod
+    def de_dict(dados: dict[str, Any]) -> CadeiaProxy:
+        return CadeiaProxy(**_filtrar_campos(CadeiaProxy, dados))
 
 
 @dataclass
@@ -129,6 +155,7 @@ class Configuracao:
     aplicativos: list[Aplicativo] = field(default_factory=list)
     texto_regras: str = TEXTO_REGRAS_PADRAO
     preferencias: Preferencias = field(default_factory=Preferencias)
+    cadeias: list[CadeiaProxy] = field(default_factory=list)
 
     def proxy_padrao(self) -> Optional[PerfilProxy]:
         ativos = [p for p in self.proxies if p.ativo]
@@ -136,6 +163,14 @@ class Configuracao:
 
     def buscar_proxy(self, nome: str) -> Optional[PerfilProxy]:
         return next((p for p in self.proxies if p.nome == nome), None)
+
+    def buscar_cadeia(self, nome: str) -> Optional[CadeiaProxy]:
+        return next((c for c in self.cadeias if c.nome == nome), None)
+
+    def perfis_da_cadeia(self, cadeia: CadeiaProxy) -> list[PerfilProxy]:
+        """Perfis habilitados da cadeia, na ordem dela; ids de perfis removidos são ignorados."""
+        por_id = {p.id: p for p in self.proxies}
+        return [por_id[i] for i in cadeia.proxies if i in por_id and por_id[i].ativo]
 
     def garantir_padrao_unico(self) -> None:
         """Deixa só um perfil marcado como padrão (o primeiro marcado vence)."""
@@ -153,6 +188,7 @@ class Configuracao:
             "aplicativos": [a.para_dict() for a in self.aplicativos],
             "texto_regras": self.texto_regras,
             "preferencias": self.preferencias.para_dict(),
+            "cadeias": [c.para_dict() for c in self.cadeias],
         }
 
     @staticmethod
@@ -162,6 +198,7 @@ class Configuracao:
             aplicativos=[Aplicativo.de_dict(a) for a in dados.get("aplicativos", [])],
             texto_regras=dados.get("texto_regras", TEXTO_REGRAS_PADRAO),
             preferencias=Preferencias.de_dict(dados.get("preferencias", {})),
+            cadeias=[CadeiaProxy.de_dict(c) for c in dados.get("cadeias", [])],
         )
 
 
