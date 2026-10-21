@@ -6,34 +6,53 @@ import os
 import platform
 import subprocess
 from pathlib import Path
-from typing import Callable
+from typing import Awaitable, Callable, Optional
 
 from .configuracao import NOME_EXIBICAO, pasta_dados
+from .teste_vazamento import CAMINHO_TESTE
 
 FornecedorPac = Callable[[], str]
+FornecedorPagina = Callable[[], Awaitable[str]]
 
 
 def gerar_script_pac(porta_socks: int, porta_http: int) -> str:
     """O PAC manda tudo para o proxy local; quem decide o destino são as regras. Assim toda
-    conexão aparece no log, inclusive as diretas."""
+    conexão aparece no log, inclusive as diretas. Só o loopback vai direto: o motor recusaria
+    como loop o acesso às portas do próprio Veredo (a página de teste, por exemplo)."""
     return f"""\
 function FindProxyForURL(url, host) {{
+    if (host === "localhost" || host === "::1" || host === "[::1]" || shExpMatch(host, "127.*")) {{
+        return "DIRECT";
+    }}
     return "PROXY 127.0.0.1:{porta_http}; SOCKS5 127.0.0.1:{porta_socks}; DIRECT";
 }}
 """
 
 
-async def iniciar_servidor_pac(fornecedor_pac: FornecedorPac, porta: int) -> asyncio.AbstractServer:
+async def iniciar_servidor_pac(fornecedor_pac: FornecedorPac, porta: int,
+                               fornecedor_teste: Optional[FornecedorPagina] = None) -> asyncio.AbstractServer:
+    """Serve o PAC em qualquer caminho e, em `CAMINHO_TESTE`, a página de teste de vazamento."""
     async def atender(leitor: asyncio.StreamReader, escritor: asyncio.StreamWriter) -> None:
         try:
-            await asyncio.wait_for(leitor.readuntil(b"\r\n\r\n"), timeout=5)
+            cabecalho = await asyncio.wait_for(leitor.readuntil(b"\r\n\r\n"), timeout=5)
         except Exception:
             escritor.close()
             return
-        corpo = fornecedor_pac().encode("utf-8")
+        partes = cabecalho.split(b"\r\n", 1)[0].split()
+        caminho = partes[1].decode("latin-1").split("?", 1)[0] if len(partes) > 1 else ""
+        if fornecedor_teste is not None and caminho == CAMINHO_TESTE:
+            try:
+                corpo = (await fornecedor_teste()).encode("utf-8")
+            except Exception:
+                escritor.close()
+                return
+            tipo = b"text/html; charset=utf-8\r\nCache-Control: no-store"
+        else:
+            corpo = fornecedor_pac().encode("utf-8")
+            tipo = b"application/x-ns-proxy-autoconfig"
         resposta = (
             b"HTTP/1.1 200 OK\r\n"
-            b"Content-Type: application/x-ns-proxy-autoconfig\r\n"
+            b"Content-Type: " + tipo + b"\r\n"
             b"Content-Length: " + str(len(corpo)).encode() + b"\r\n"
             b"Connection: close\r\n\r\n" + corpo
         )

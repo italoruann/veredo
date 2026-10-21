@@ -10,7 +10,7 @@ import threading
 import time
 from typing import Callable, Optional, Protocol
 
-from . import cliente_proxy, dns, processos, proxy_http, rede, socks5, udp, verificacao_ip
+from . import cliente_proxy, dns, processos, proxy_http, rede, socks5, teste_vazamento, udp, verificacao_ip
 from .cliente_proxy import Rota
 from .configuracao import Configuracao, PerfilProxy, Preferencias
 from .integracao_sistema import gerar_script_pac, iniciar_servidor_pac
@@ -215,7 +215,7 @@ class MotorProxy:
         try:
             self._servidor_socks = await asyncio.start_server(self._atender_socks, "127.0.0.1", prefs.porta_socks)
             self._servidor_http = await asyncio.start_server(self._atender_http, "127.0.0.1", prefs.porta_http)
-            self._servidor_pac = await iniciar_servidor_pac(self._texto_pac, prefs.porta_pac)
+            self._servidor_pac = await iniciar_servidor_pac(self._texto_pac, prefs.porta_pac, self._pagina_teste)
         except OSError as exc:
             self._emitir_estado(False, f"Não foi possível abrir as portas locais: {exc}")
             raise
@@ -233,6 +233,26 @@ class MotorProxy:
     def _texto_pac(self) -> str:
         prefs = self.configuracao.preferencias
         return gerar_script_pac(prefs.porta_socks, prefs.porta_http)
+
+    async def _pagina_teste(self) -> str:
+        """Página de teste de vazamento com o IP real e os IPs de saída conhecidos dos proxies.
+
+        O IP do proxy padrão é consultado na hora se ainda não estiver em cache."""
+        prefs = self.configuracao.preferencias
+        padrao = self.configuracao.proxy_padrao()
+        consultas = [verificacao_ip.consultar_ip_real(), verificacao_ip.consultar_ip_real(ipv6=True)]
+        if padrao is not None and self._chave_cache_ip(padrao) not in self._cache_ip_saida:
+            consultas.append(self._atualizar_ip_saida(padrao))
+        ip_real, ip_real_v6, *_ = await asyncio.gather(*consultas)
+        ips_proxy = {ip for _momento, ip in self._cache_ip_saida.values()}
+        ips_proxy.update(self._ip_saida_por_perfil.values())
+        return teste_vazamento.gerar_pagina(teste_vazamento.DadosTeste(
+            ip_real=ip_real or "", ip_real_v6=ip_real_v6 or "",
+            # Um proxy que sai pelo IP da própria máquina não conta como IP de proxy.
+            ips_proxy=sorted(ips_proxy - {"", "?", ip_real, ip_real_v6}),
+            modo_transparente=prefs.modo_transparente_ativo, dns_pelo_proxy=prefs.dns_ativo,
+            prevenir_vazamento=prefs.prevenir_vazamento, proxy_sistema=prefs.integracao_sistema_ativa,
+        ))
 
     async def _encerrar(self) -> None:
         servidores = [s for s in (self._servidor_socks, self._servidor_http, self._servidor_pac,
@@ -315,7 +335,7 @@ class MotorProxy:
 
         if novas.porta_pac != antigas.porta_pac:
             try:
-                novo = await iniciar_servidor_pac(self._texto_pac, novas.porta_pac)
+                novo = await iniciar_servidor_pac(self._texto_pac, novas.porta_pac, self._pagina_teste)
                 await _fechar_servidor(self._servidor_pac)
                 self._servidor_pac = novo
                 aplicados.append(f"PAC → porta {novas.porta_pac}")

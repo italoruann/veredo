@@ -7,15 +7,15 @@ import time
 from typing import Callable, Optional
 
 import psutil
-from PySide6.QtCore import QSize, Qt, QTimer
-from PySide6.QtGui import QAction, QActionGroup, QIcon, QKeySequence
+from PySide6.QtCore import QSize, Qt, QTimer, QUrl
+from PySide6.QtGui import QAction, QActionGroup, QDesktopServices, QIcon, QKeySequence
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QDialog, QDialogButtonBox, QDockWidget, QFileDialog, QFrame,
     QHeaderView, QInputDialog, QLabel, QMainWindow, QMenu, QMenuBar, QMessageBox, QScrollArea,
     QSizePolicy, QSystemTrayIcon, QTableView, QTabWidget, QToolBar, QToolButton, QVBoxLayout, QWidget,
 )
 
-from ..nucleo import arquivo_perfil
+from ..nucleo import arquivo_perfil, teste_vazamento
 from ..nucleo.configuracao import NOME_EXIBICAO
 from .contexto import Contexto
 from .icone import desenhar_icone
@@ -183,6 +183,9 @@ class JanelaPrincipal(QMainWindow):
             self.acoes_perfil.append(self._acao(
                 f"{titulo}...", lambda _c=False, i=i: self.abrir_dialogo_perfil(i), f"Ctrl+{i + 1}", dica,
                 icone_linha(nome_icone)))
+        self.acao_teste_vazamento = self._acao("&Testar vazamentos...", self.testar_vazamentos,
+                                               dica="Abre no navegador uma página que confere o IP visto "
+                                                    "pelos sites, o IPv6, o WebRTC e o DNS")
         self.acao_importar_perfil = self._acao("&Importar perfil...", self.importar_perfil,
                                                dica="Carrega proxies, cadeias e regras de um arquivo "
                                                     "do Veredo (.json) ou do Proxifier (.ppx)",
@@ -228,6 +231,7 @@ class JanelaPrincipal(QMainWindow):
         self.barra_menus.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Preferred)
         menu_arquivo = self.barra_menus.addMenu("&Arquivo")
         menu_arquivo.addAction(self.acao_motor)
+        menu_arquivo.addAction(self.acao_teste_vazamento)
         menu_arquivo.addSeparator()
         menu_arquivo.addAction(self.acao_importar_perfil)
         menu_arquivo.addAction(self.acao_exportar_perfil)
@@ -633,6 +637,15 @@ class JanelaPrincipal(QMainWindow):
             self.log.setTextCursor(cursor)
             if not self.log.find(self._ultima_busca):
                 self.statusBar().showMessage(f"\"{self._ultima_busca}\" não encontrado", 3000)
+
+    def testar_vazamentos(self) -> None:
+        if not self.ctx.motor.em_execucao():
+            QMessageBox.information(self, "Testar vazamentos", "Inicie o motor antes de testar.")
+            return
+        url = teste_vazamento.url_teste(self.ctx.configuracao.preferencias.porta_pac)
+        QDesktopServices.openUrl(QUrl(url))
+        self.log.mensagem(f"Teste de vazamento aberto no navegador padrão. Para testar outro navegador, "
+                          f"abra {url} nele.")
 
     def _salvar_log(self) -> None:
         caminho, _ = QFileDialog.getSaveFileName(self, "Salvar log", "veredo.log", "Log (*.log *.txt)")

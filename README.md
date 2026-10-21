@@ -60,6 +60,18 @@ consultado no [ip-api.com](https://ip-api.com) pelo próprio proxy.
 Ao começar, nenhum proxy vem cadastrado e as regras de exemplo não afetam sites reais. Cada
 pessoa monta a sua configuração.
 
+## Teste de vazamento
+
+Com o motor ligado, **Arquivo > Testar vazamentos** abre no navegador padrão a página
+`http://127.0.0.1:58090/teste` (a porta é a do PAC). Para testar outro navegador, abra esse
+endereço nele. A página confere, de dentro do navegador:
+
+- **IP (IPv4 e IPv6):** o endereço que os sites veem, comparado com o IP real da máquina, que o
+  Veredo consulta por conexão direta, e com os IPs de saída dos proxies.
+- **WebRTC:** os endereços públicos que o navegador descobre por STUN. No modo explícito o UDP não
+  passa pelo Veredo, então é comum o IP real aparecer aqui.
+- **DNS:** a situação conforme a configuração (DNS pelo proxy no modo transparente ou não).
+
 ## Regras
 
 As regras podem ser editadas em uma tabela ou como texto. As duas formas mostram a mesma coisa.

@@ -323,3 +323,34 @@ def test_parar_fecha_conexoes_ociosas_e_religar_funciona():
             servidor_destino.close()
 
     asyncio.run(cenario())
+
+
+def test_pac_serve_pagina_de_teste_de_vazamento(monkeypatch):
+    from proxy_manager.nucleo import verificacao_ip
+
+    async def ip_real(ipv6=False, timeout=5.0):
+        return None if ipv6 else "203.0.113.7"
+
+    monkeypatch.setattr(verificacao_ip, "consultar_ip_real", ip_real)
+
+    async def baixar(caminho: str) -> bytes:
+        leitor, escritor = await asyncio.open_connection("127.0.0.1", PORTA_PAC)
+        escritor.write(f"GET {caminho} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n".encode())
+        await escritor.drain()
+        dados = await leitor.read(-1)
+        escritor.close()
+        return dados
+
+    async def cenario():
+        motor, _registro = _criar_motor("*\n")
+        motor.iniciar()
+        try:
+            pagina = await baixar("/teste?x=1")
+            assert b"text/html" in pagina.split(b"\r\n\r\n", 1)[0]
+            assert b'"ip_real": "203.0.113.7"' in pagina
+            pac = await baixar("/proxy.pac")
+            assert b"FindProxyForURL" in pac and b'return "DIRECT"' in pac
+        finally:
+            motor.parar()
+
+    asyncio.run(cenario())
