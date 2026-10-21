@@ -286,3 +286,40 @@ def test_conexao_ao_proprio_servidor_proxy_vai_direto():
             servidor_destino.close()
 
     asyncio.run(cenario())
+
+
+def test_parar_fecha_conexoes_ociosas_e_religar_funciona():
+    """Navegadores deixam conexões abertas com a porta local antes de mandar o pedido. Ao parar,
+    o motor precisa fechá-las; senão o navegador as reaproveita depois de religar e fica sem
+    resposta até ser reaberto."""
+    async def cenario():
+        servidor_destino, porta_destino = await _iniciar_servidor_destino(b"ola de novo")
+        motor, _registro = _criar_motor("127.0.0.1 +direct\n")
+        motor.iniciar()
+        ociosas = [await asyncio.open_connection("127.0.0.1", porta) for porta in (PORTA_HTTP, PORTA_SOCKS)]
+        await asyncio.sleep(0.2)
+        try:
+            t0 = time.monotonic()
+            await asyncio.to_thread(motor.parar)
+            decorrido = time.monotonic() - t0
+            assert decorrido < 2.0, f"parar() levou {decorrido:.2f}s"
+            for leitor, escritor in ociosas:
+                # O lado do motor foi fechado: o cliente recebe EOF ou reset, em vez de ficar pendurado.
+                try:
+                    assert await asyncio.wait_for(leitor.read(1), timeout=2) == b""
+                except ConnectionError:
+                    pass
+                escritor.close()
+
+            motor.iniciar()
+            leitor, escritor = await asyncio.open_connection("127.0.0.1", PORTA_HTTP)
+            pedido = (f"GET http://127.0.0.1:{porta_destino}/ HTTP/1.1\r\n"
+                      f"Host: 127.0.0.1:{porta_destino}\r\nConnection: close\r\n\r\n").encode()
+            escritor.write(pedido)
+            await escritor.drain()
+            assert b"ola de novo" in await asyncio.wait_for(leitor.read(-1), timeout=5)
+        finally:
+            await asyncio.to_thread(motor.parar)
+            servidor_destino.close()
+
+    asyncio.run(cenario())

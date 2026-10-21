@@ -199,6 +199,13 @@ class MotorProxy:
             self._pronto.set()
             self._emitir_estado(False, f"Falha ao iniciar o motor: {exc}")
         finally:
+            # Atendimentos ainda em andamento (por exemplo, conectando ao destino) são cancelados
+            # para que os sockets deles sejam fechados antes de o loop sumir.
+            pendentes = asyncio.all_tasks(loop)
+            for tarefa in pendentes:
+                tarefa.cancel()
+            if pendentes:
+                loop.run_until_complete(asyncio.gather(*pendentes, return_exceptions=True))
             loop.close()
 
     async def _iniciar_servidores(self) -> None:
@@ -232,6 +239,10 @@ class MotorProxy:
                                   self._servidor_transparente) if s is not None]
         for servidor in servidores:
             servidor.close()
+            # Derruba também as conexões ainda sem pedido (navegadores abrem algumas de reserva).
+            # Se ficassem abertas, depois de religar o navegador as reaproveitaria e esperaria
+            # para sempre uma resposta de um motor que já parou.
+            servidor.abort_clients()
 
         # Túneis longos (HTTPS aberto pelo navegador) são abortados; sem isso wait_closed()
         # ficaria esperando indefinidamente.
