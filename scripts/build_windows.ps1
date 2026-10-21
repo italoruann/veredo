@@ -3,15 +3,47 @@
 #
 #   .\scripts\build_windows.ps1          -> roda como usuario comum (modo explicito/PAC)
 #   .\scripts\build_windows.ps1 -Admin   -> pede UAC ao abrir (necessario so pro modo transparente)
+#   .\scripts\build_windows.ps1 -Root    -> como -Admin, e instala em C:\Program Files\Veredo com
+#                                           atalho no menu Iniciar (pede UAC para instalar)
+#   .\scripts\build_windows.ps1 -Uninstall -> fecha o app e remove a instalacao
 #
 # Usa o uv se estiver instalado; senao cria/usa o .venv com o pip.
 param(
-    [switch]$Admin
+    [switch]$Admin,
+    [switch]$Root,
+    [switch]$Uninstall
 )
 $ErrorActionPreference = "Stop"
+if ($Root) { $Admin = $true }
 
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $RepoRoot
+
+$InstallDir = Join-Path $env:ProgramFiles "Veredo"
+$StartMenuLink = Join-Path $env:ProgramData "Microsoft\Windows\Start Menu\Programs\Veredo.lnk"
+
+$IsElevated = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
+    ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+
+# Roda um trecho de PowerShell como administrador: direto se este terminal ja for elevado, senao
+# numa janela elevada (um pedido de UAC) e espera ela terminar.
+function Invoke-Elevated([string]$What, [string]$Script) {
+    if ($IsElevated) {
+        & ([scriptblock]::Create($Script))
+        return
+    }
+    $Encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes(
+        "`$ErrorActionPreference = 'Stop'`n" + $Script))
+    try {
+        $p = Start-Process powershell -Verb RunAs -Wait -PassThru -WindowStyle Hidden -ArgumentList @(
+            "-NoProfile", "-ExecutionPolicy", "Bypass", "-EncodedCommand", $Encoded)
+    } catch {
+        throw "$What cancelado: a permissao de administrador foi negada."
+    }
+    if ($p.ExitCode -ne 0) { throw "$What falhou (codigo $($p.ExitCode))" }
+}
+
+function Quote([string]$Text) { "'" + $Text.Replace("'", "''") + "'" }
 
 function Invoke-Checked([string]$What, [scriptblock]$Command) {
     & $Command
@@ -70,13 +102,25 @@ if ($Running) {
         try {
             $Left | Stop-Process -Force -ErrorAction Stop
         } catch {
-            throw "Nao consegui fechar o Veredo em execucao (se ele foi aberto como administrador, feche-o pela bandeja ou rode este script como administrador)."
+            # Aberto como administrador: so um processo elevado consegue fecha-lo.
+            Invoke-Elevated "Fechar o Veredo" "Get-Process -Name Veredo -ErrorAction SilentlyContinue | Stop-Process -Force"
         }
         Start-Sleep -Seconds 1
         # Morto a forca ele nao desfez o proxy do sistema; desfaz aqui.
         Invoke-Python "Remover o proxy do sistema" @("-c",
             "from proxy_manager.nucleo.integracao_sistema import remover_proxy_sistema; print(remover_proxy_sistema(manter_atalhos=True)[1])")
     }
+}
+
+if ($Uninstall) {
+    if ((Test-Path $InstallDir) -or (Test-Path $StartMenuLink)) {
+        Write-Host "Removendo $InstallDir..."
+        Invoke-Elevated "Remover a instalacao" (
+            "Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $(Quote $InstallDir)`n" +
+            "Remove-Item -Force -ErrorAction SilentlyContinue $(Quote $StartMenuLink)")
+    }
+    Write-Host "Veredo desinstalado."
+    exit 0
 }
 
 foreach ($Old in @("dist\Veredo.exe", "build")) {
@@ -99,7 +143,24 @@ try {
 }
 
 Write-Host "`nExecutavel gerado em dist\Veredo.exe"
-if ($Admin) {
+if ($Root) {
+    # Program Files: so o administrador escreve ali, entao ninguem troca o executavel que roda
+    # elevado. O atalho fica no menu Iniciar de todos os usuarios.
+    Write-Host "`nInstalando em $InstallDir (pede permissao de administrador)..."
+    $Exe = Join-Path $InstallDir "Veredo.exe"
+    Invoke-Elevated "Instalar" (
+        "New-Item -ItemType Directory -Force $(Quote $InstallDir) | Out-Null`n" +
+        "Copy-Item -Force $(Quote (Join-Path $RepoRoot 'dist\Veredo.exe')) $(Quote $Exe)`n" +
+        "Copy-Item -Force $(Quote (Join-Path $RepoRoot 'packaging\icon.ico')) $(Quote (Join-Path $InstallDir 'icon.ico'))`n" +
+        "`$atalho = (New-Object -ComObject WScript.Shell).CreateShortcut($(Quote $StartMenuLink))`n" +
+        "`$atalho.TargetPath = $(Quote $Exe)`n" +
+        "`$atalho.WorkingDirectory = $(Quote $InstallDir)`n" +
+        "`$atalho.IconLocation = $(Quote (Join-Path $InstallDir 'icon.ico'))`n" +
+        "`$atalho.Description = 'Veredo'`n" +
+        "`$atalho.Save()")
+    Write-Host "Instalado em $InstallDir, com atalho 'Veredo' no menu Iniciar."
+    Write-Host "Ele pede elevacao (UAC) ao abrir e roda como administrador, com o modo transparente liberado."
+} elseif ($Admin) {
     Write-Host "Ele pede elevacao (UAC) toda vez que for aberto (necessario pro modo transparente)."
 } else {
     Write-Host "Roda como usuario comum. Para o modo transparente, gere com: .\scripts\build_windows.ps1 -Admin"

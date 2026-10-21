@@ -217,7 +217,13 @@ aberto e apagam o build anterior antes de começar.
 ```powershell
 .\scripts\build_windows.ps1          # roda como usuário comum
 .\scripts\build_windows.ps1 -Admin   # pede permissão de administrador ao abrir (modo transparente)
+.\scripts\build_windows.ps1 -Root    # como -Admin, e instala em Program Files com atalho no menu Iniciar
+.\scripts\build_windows.ps1 -Uninstall  # remove a instalação
 ```
+
+Com `-Root`, o executável é instalado em `C:\Program Files\Veredo`, pasta em que só o
+administrador escreve, e o atalho **Veredo** vai para o menu Iniciar. Ao abrir, ele pede o UAC e
+roda como administrador, com o modo transparente e as demais opções avançadas liberados.
 
 **Linux** (gera `dist/veredo`; rode no próprio Linux):
 
