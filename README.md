@@ -225,8 +225,14 @@ aberto e apagam o build anterior antes de começar.
 ./scripts/build_linux.sh                    # só gera o executável
 ./scripts/build_linux.sh --install          # instala para o seu usuário, com atalho no menu
 ./scripts/build_linux.sh --install --admin  # instala em /opt e abre pedindo senha (modo transparente)
-./scripts/build_linux.sh --uninstall        # remove as instalações
+./scripts/build_linux.sh --root             # instala em /opt com o motor como serviço root
+./scripts/build_linux.sh --uninstall        # remove as instalações (e o serviço)
 ```
+
+Com `--root`, a senha do `sudo` é pedida uma vez, na instalação. O motor passa a rodar como root
+no serviço `veredo.service`, iniciado com o sistema, e o modo transparente funciona sem pedir
+senha. O atalho do menu abre só a janela, como usuário comum, e ela controla o serviço (veja
+[Serviço do sistema](#serviço-do-sistema)).
 
 ## Onde ficam os dados
 

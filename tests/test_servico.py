@@ -153,3 +153,13 @@ def test_unidade_do_systemd():
     assert "WantedBy=multi-user.target" in unidade
     linha = next(l for l in unidade.splitlines() if l.startswith("ExecStart="))
     assert linha.endswith("--servico")
+
+
+def test_executavel_empacotado_usa_a_propria_pasta(monkeypatch, tmp_path):
+    # A pasta de extração do PyInstaller some depois; o serviço não pode depender dela.
+    executavel = tmp_path / "veredo"
+    monkeypatch.setattr(servico.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(servico.sys, "executable", str(executavel))
+    unidade = servico.unidade_systemd()
+    assert f"ExecStart={executavel} --servico" in unidade
+    assert f"WorkingDirectory={tmp_path}" in unidade

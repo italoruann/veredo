@@ -6,7 +6,10 @@
 #   ./scripts/build_linux.sh --install          gera e instala pro seu usuario (~/.local), sem sudo,
 #                                               com atalho no menu -- roda como usuario comum
 #   ./scripts/build_linux.sh --install --admin  gera e instala em /opt (pede sudo) com atalho que
-#                                               abre via pkexec -- necessario so pro modo transparente
+#                                               abre via pkexec -- pede a senha toda vez que abre
+#   ./scripts/build_linux.sh --root             gera e instala em /opt (pede sudo uma vez) com o
+#                                               motor como servico do systemd, rodando como root
+#                                               desde o boot; o atalho abre so a janela, sem senha
 #   ./scripts/build_linux.sh --uninstall        fecha o app e remove todas as instalacoes
 #
 # Sempre fecha o Veredo se estiver aberto e apaga o build anterior. Com --install, remove
@@ -20,13 +23,15 @@ cd "$ROOT"
 
 INSTALL=0
 ADMIN=0
+SERVICO=0
 UNINSTALL=0
 for arg in "$@"; do
     case "$arg" in
         --install) INSTALL=1 ;;
         --admin) ADMIN=1 ;;
+        --root) INSTALL=1; SERVICO=1 ;;
         --uninstall) UNINSTALL=1 ;;
-        -h|--help) sed -n '2,15p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,18p' "$0"; exit 0 ;;
         *) echo "Opcao desconhecida: $arg (use --help)" >&2; exit 1 ;;
     esac
 done
@@ -35,6 +40,7 @@ USER_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/veredo"
 USER_DESKTOP="${XDG_DATA_HOME:-$HOME/.local/share}/applications/veredo.desktop"
 ADMIN_DIR=/opt/veredo
 ADMIN_DESKTOP=/usr/share/applications/veredo.desktop
+SERVICE_UNIT=/etc/systemd/system/veredo.service
 AUTOSTART="$HOME/.config/autostart/veredo.desktop"
 
 # --- Ambiente Python ------------------------------------------------------------
@@ -91,7 +97,22 @@ stop_running() {
     fi
 }
 
+uninstall_service() {
+    [ -e "$SERVICE_UNIT" ] || return 0
+    echo "Removendo o servico do sistema (pede sudo)..."
+    if [ -x "$ADMIN_DIR/veredo" ]; then
+        sudo "$ADMIN_DIR/veredo" --remover-servico || true
+    fi
+    # Sem o executavel (ou se ele falhar), desfaz pelo systemctl.
+    if [ -e "$SERVICE_UNIT" ]; then
+        sudo systemctl disable --now veredo.service 2>/dev/null || true
+        sudo rm -f "$SERVICE_UNIT"
+        sudo systemctl daemon-reload || true
+    fi
+}
+
 uninstall_all() {
+    uninstall_service
     if [ -e "$USER_DIR" ] || [ -e "$USER_DESKTOP" ]; then
         echo "Removendo a instalacao anterior em $USER_DIR..."
         rm -rf "$USER_DIR"
@@ -139,6 +160,11 @@ fi
 # --- Instalacao -----------------------------------------------------------------
 
 uninstall_all
+
+if [ "$SERVICO" -eq 1 ]; then
+    sudo packaging/linux/install.sh --servico
+    exit 0
+fi
 
 if [ "$ADMIN" -eq 1 ]; then
     sudo packaging/linux/install.sh

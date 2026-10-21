@@ -427,6 +427,10 @@ def comando_servico() -> list[str]:
 
 
 def pasta_projeto() -> str:
+    # No executável do PyInstaller, __file__ fica na pasta temporária de extração, que some
+    # quando o processo termina: o serviço usa a pasta do próprio executável.
+    if getattr(sys, "frozen", False):
+        return str(Path(sys.executable).resolve().parent)
     return str(Path(__file__).resolve().parents[2])
 
 
