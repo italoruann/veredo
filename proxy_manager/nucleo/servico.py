@@ -42,6 +42,8 @@ INTERVALO_CONTADORES = 1.0
 # Novas tentativas de ligar o motor no boot, se a primeira falhar.
 TENTATIVAS_BOOT = 24
 INTERVALO_TENTATIVA_BOOT = 5.0
+# Um estado igual ao anterior, recebido dentro deste intervalo, é a cópia vinda do outro canal.
+JANELA_REPETICAO = 2.0
 LIMITE_LINHA = 16 * 1024 * 1024
 
 
@@ -340,6 +342,9 @@ class MotorRemoto:
         self.ao_mudar_estado: Optional[Callable[[bool, str], None]] = None
         self.ao_mudar_ip_saida: Optional[Callable[[str, str, str], None]] = None
         self._ativo = False
+        self._trava_estado = threading.Lock()
+        self._ultimo_estado: Optional[tuple[bool, str]] = None
+        self._instante_estado = 0.0
         self._conectado = False
         self.conexoes_ativas = 0
         self.total_enviado = self.total_recebido = 0
@@ -409,7 +414,15 @@ class MotorRemoto:
         self._thread.join(timeout=3)
 
     def _emitir(self, ativo: bool, mensagem: str) -> None:
-        self._ativo = ativo
+        # O mesmo estado chega duas vezes: na resposta de "iniciar"/"parar" e pelo canal de
+        # acompanhamento. A segunda cópia, logo em seguida, é descartada.
+        with self._trava_estado:
+            agora = time.monotonic()
+            repetido = (ativo, mensagem) == self._ultimo_estado and agora - self._instante_estado < JANELA_REPETICAO
+            self._ativo = ativo
+            self._ultimo_estado, self._instante_estado = (ativo, mensagem), agora
+        if repetido:
+            return
         if self.ao_mudar_estado:
             self.ao_mudar_estado(ativo, mensagem)
 

@@ -80,7 +80,7 @@ def test_janela_controla_o_servico_e_recebe_o_log(pasta_servico):
         registro_janela = Registro(dias_retencao=1)
         remoto = servico.MotorRemoto(registro_janela, PORTA_CONTROLE)
         estados = []
-        remoto.ao_mudar_estado = lambda ativo, mensagem: estados.append(ativo)
+        remoto.ao_mudar_estado = lambda ativo, mensagem: estados.append((ativo, mensagem))
         try:
             # a janela manda a configuração dela (com senha) e liga o motor do serviço
             cfg = _configuracao("localhost +direct\n* +block\n")
@@ -109,6 +109,10 @@ def test_janela_controla_o_servico_e_recebe_o_log(pasta_servico):
 
             remoto.parar()
             assert not remoto.em_execucao() and not srv.motor.em_execucao()
+            # o estado chega pela resposta e pelo acompanhamento, mas a janela registra uma vez só
+            time.sleep(0.5)
+            assert estados.count((True, "Motor iniciado")) == 1
+            assert estados.count((False, "Motor parado")) == 1
         finally:
             remoto.desconectar()
         # fechar a janela não para o serviço
