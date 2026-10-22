@@ -38,6 +38,9 @@ _FORMAS = {
     "chart": '<path d="M3 21h18M6 17v-5M12 17V5M18 17v-8"/>',
     "pin": '<path d="M9 3h6l-1 7 3 3H7l3-3zM12 13v8"/>',
     "close": '<path d="M6 6l12 12M18 6L6 18"/>',
+    "inspect": '<circle cx="10.5" cy="10.5" r="6.5"/><path d="M15.5 15.5L21 21M8 10.5h5M10.5 8v5"/>',
+    "shield": '<path d="M12 3l8 3v6c0 4.5-3.4 8-8 9-4.6-1-8-4.5-8-9V6z"/><path d="M9 12l2 2 4-4"/>',
+    "save": '<path d="M5 3h11l3 3v15H5z"/><path d="M8 3v5h7V3M8 21v-7h8v7"/>',
 }
 
 TAMANHOS_PIXEL = (16, 20, 24, 32, 48)

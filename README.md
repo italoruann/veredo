@@ -4,7 +4,9 @@ Cliente de proxy para Windows e Linux. Você diz quais programas e quais sites p
 proxy, quais vão direto e quais são bloqueados, e acompanha cada conexão em tempo real.
 
 Funciona com proxies SOCKS5, SOCKS4/4A, HTTP e HTTPS, com ou sem usuário e senha, permite ter
-vários perfis cadastrados ao mesmo tempo e encadeá-los (cadeias de proxy).
+vários perfis cadastrados ao mesmo tempo e encadeá-los (cadeias de proxy). Também intercepta o
+tráfego HTTP e HTTPS, como o mitmproxy, e mostra cada requisição e resposta com cabeçalhos e
+corpos no inspetor de tráfego.
 
 > O projeto está em fase de testes. Se encontrar algum problema, abra uma issue contando o
 > sistema operacional, o que você fez e o que apareceu no log.
@@ -71,6 +73,47 @@ endereço nele. A página confere, de dentro do navegador:
 - **WebRTC:** os endereços públicos que o navegador descobre por STUN. No modo explícito o UDP não
   passa pelo Veredo, então é comum o IP real aparecer aqui.
 - **DNS:** a situação conforme a configuração (DNS pelo proxy no modo transparente ou não).
+
+## Inspetor de tráfego (interceptação HTTP/HTTPS)
+
+**Arquivo > Inspetor de tráfego** (Ctrl+I) abre uma janela com cada requisição HTTP/HTTPS que
+passa pelo Veredo: método, URL, status, tipo, tamanho, tempo e aplicativo. Ao selecionar uma,
+aparecem os cabeçalhos e o corpo da requisição e da resposta. O corpo é mostrado como texto,
+JSON formatado, hexadecimal ou imagem, e gzip, deflate e zstd são descomprimidos.
+
+1. Clique em **Interceptar**. Só as conexões abertas depois disso são interceptadas.
+2. Instale o certificado em **Certificado > Instalar no sistema**. O Veredo cria uma autoridade
+   certificadora (CA) local na primeira vez. No Windows ela vai para as raízes confiáveis do
+   usuário, que valem para Chrome, Edge e Firefox. No Linux ela vai para o repositório da
+   distribuição (pede a senha); o Firefox no Linux precisa importá-la à mão. Com o motor
+   ligado, o certificado também pode ser baixado em `http://127.0.0.1:58090/veredo-ca.crt`.
+3. Use os programas normalmente. O tráfego chega ao Veredo como sempre (proxy do sistema,
+   portas locais ou modo transparente) e as regras continuam valendo: a interceptação acontece
+   depois delas, inclusive nas conexões que passam por proxy ou por cadeia.
+
+Para filtrar a lista, digite qualquer trecho da URL. Também dá para filtrar por campo, com
+`metodo:post`, `status:4` (todos os 4xx), `host:api` e `app:chrome`. Pelo menu de contexto você
+copia a URL, copia a requisição como comando cURL, salva o corpo ou deixa de interceptar um
+host. **Exportar HAR** salva os fluxos exibidos num arquivo que o DevTools dos navegadores, o
+Insomnia e o Charles abrem.
+
+Em **Configurar** você limita a interceptação a alguns hosts (`*.exemplo.com; api.site.com`),
+define as exceções, escolhe quanto de cada corpo guardar (o corpo inteiro é repassado mesmo
+acima do limite) e decide se servidores com certificado inválido são recusados.
+
+Detalhes:
+
+- Os fluxos ficam só na memória (podem conter senhas e cookies) e somem ao fechar o Veredo.
+- Conexões que não são HTTP (SSH, SMTP, IMAP...) passam sem alteração. O Veredo percebe isso
+  quando o servidor fala primeiro ou quando os bytes não são TLS nem HTTP.
+- O HTTP/2 é negociado como HTTP/1.1, e WebSockets aparecem como `101 WebSocket` e continuam
+  funcionando, mas as mensagens deles não são mostradas.
+- O Veredo tira o `br` do `Accept-Encoding`, porque não consegue descomprimir brotli.
+- Aplicativos com certificado fixo (pinning) recusam a interceptação. Eles aparecem na lista
+  como `TLS / Erro`; ponha esses hosts nas exceções.
+- A CA fica em `interceptacao/` na pasta de dados. A chave privada nunca sai da máquina.
+  Remova o certificado do sistema quando não precisar mais da interceptação. No modo serviço
+  a CA é a do serviço, então instale-a pelo inspetor depois de ligar o serviço.
 
 ## Regras
 
@@ -257,6 +300,7 @@ Tudo fica na pasta do seu usuário. **Arquivo > Abrir pasta de dados** abre o lo
 - `conexoes.db`: histórico das conexões, apagado automaticamente depois do número de dias
   definido nas Configurações.
 - `ip_saida.json`: último IP de saída de cada perfil.
+- `interceptacao/`: certificado e chave da CA local da interceptação.
 
 As senhas dos proxies são guardadas no cofre do sistema (Gerenciador de Credenciais no Windows,
 Secret Service no Linux). Se não houver cofre disponível, ficam no `config.json`.

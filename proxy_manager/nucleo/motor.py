@@ -12,8 +12,11 @@ from typing import Callable, Optional, Protocol
 
 from . import cliente_proxy, dns, processos, proxy_http, rede, socks5, teste_vazamento, udp, verificacao_ip
 from .cliente_proxy import Rota
-from .configuracao import Configuracao, PerfilProxy, Preferencias
+from .configuracao import Configuracao, PerfilProxy, Preferencias, pasta_dados
 from .integracao_sistema import gerar_script_pac, iniciar_servidor_pac
+from .interceptacao.certificados import AutoridadeCertificadora
+from .interceptacao.fluxos import ArmazemFluxos
+from .interceptacao.interceptador import Interceptador
 from .registro import EntradaLog, Registro
 from .regras import ConjuntoRegras, Resultado
 from .transparente import inspecao
@@ -76,9 +79,13 @@ async def _fechar_servidor(servidor: Optional[asyncio.AbstractServer]) -> None:
 
 
 class MotorProxy:
-    def __init__(self, configuracao: Configuracao, registro: Registro):
+    def __init__(self, configuracao: Configuracao, registro: Registro,
+                 fluxos: Optional[ArmazemFluxos] = None):
         self.configuracao = configuracao
         self.registro = registro
+        self.fluxos = fluxos if fluxos is not None else ArmazemFluxos()
+        self.autoridade = AutoridadeCertificadora(pasta_dados() / "interceptacao")
+        self.interceptador = Interceptador(self.autoridade, self.fluxos, lambda: self.configuracao.preferencias)
         self.conjunto_regras = ConjuntoRegras.interpretar(configuracao.texto_regras)
         self.ao_mudar_estado: Optional[CallbackEstado] = None
         self.ao_mudar_ip_saida: Optional[CallbackIpSaida] = None
@@ -215,7 +222,8 @@ class MotorProxy:
         try:
             self._servidor_socks = await asyncio.start_server(self._atender_socks, "127.0.0.1", prefs.porta_socks)
             self._servidor_http = await asyncio.start_server(self._atender_http, "127.0.0.1", prefs.porta_http)
-            self._servidor_pac = await iniciar_servidor_pac(self._texto_pac, prefs.porta_pac, self._pagina_teste)
+            self._servidor_pac = await iniciar_servidor_pac(self._texto_pac, prefs.porta_pac, self._pagina_teste,
+                                                           self.certificado_ca)
         except OSError as exc:
             self._emitir_estado(False, f"Não foi possível abrir as portas locais: {exc}")
             raise
@@ -253,6 +261,14 @@ class MotorProxy:
             modo_transparente=prefs.modo_transparente_ativo, dns_pelo_proxy=prefs.dns_ativo,
             prevenir_vazamento=prefs.prevenir_vazamento, proxy_sistema=prefs.integracao_sistema_ativa,
         ))
+
+    def certificado_ca(self) -> bytes:
+        """Certificado (PEM, só a parte pública) que os aplicativos precisam confiar para a
+        interceptação de HTTPS. É criado na primeira chamada."""
+        return self.autoridade.certificado_pem()
+
+    def recriar_ca(self) -> None:
+        self.autoridade.recriar()
 
     async def _encerrar(self) -> None:
         servidores = [s for s in (self._servidor_socks, self._servidor_http, self._servidor_pac,
@@ -335,7 +351,8 @@ class MotorProxy:
 
         if novas.porta_pac != antigas.porta_pac:
             try:
-                novo = await iniciar_servidor_pac(self._texto_pac, novas.porta_pac, self._pagina_teste)
+                novo = await iniciar_servidor_pac(self._texto_pac, novas.porta_pac, self._pagina_teste,
+                                                  self.certificado_ca)
                 await _fechar_servidor(self._servidor_pac)
                 self._servidor_pac = novo
                 aplicados.append(f"PAC → porta {novas.porta_pac}")
@@ -671,12 +688,15 @@ class MotorProxy:
             self._finalizar_bloqueada(entrada, inicio, resultado)
             return
 
+        # Mesmo via proxy o túnel já termina no servidor de destino, que recebe a forma de origem;
+        # credenciais do proxy nunca vão nesta requisição. Com a interceptação ligada, quem a envia
+        # é o interceptador, que a registra como o primeiro fluxo da conexão.
+        requisicao = b"" if eh_connect else proxy_http.requisicao_forma_origem(cabecalho)
+        interceptar = self.interceptador.ativo
         try:
             leitor_destino, escritor_destino = await self._conectar_destino(resultado, rota, host, porta, entrada)
-            if not eh_connect:
-                # Mesmo via proxy o túnel já termina no servidor de destino, que recebe a forma
-                # de origem; credenciais do proxy nunca vão nesta requisição.
-                escritor_destino.write(proxy_http.requisicao_forma_origem(cabecalho))
+            if requisicao and not interceptar:
+                escritor_destino.write(requisicao)
                 await escritor_destino.drain()
         except Exception as exc:
             await self._erro_http(escritor, 502, "Bad Gateway")
@@ -686,7 +706,8 @@ class MotorProxy:
         if eh_connect:
             escritor.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
             await escritor.drain()
-        await self._tunelar(leitor, escritor, leitor_destino, escritor_destino, resultado, rota, entrada, inicio)
+        await self._tunelar(leitor, escritor, leitor_destino, escritor_destino, resultado, rota, entrada, inicio,
+                            interceptar=interceptar, prefixo_cliente=requisicao if interceptar else b"")
 
     async def _atender_transparente(self, leitor: asyncio.StreamReader, escritor: asyncio.StreamWriter) -> None:
         inicio = time.monotonic()
@@ -728,10 +749,12 @@ class MotorProxy:
             self._finalizar_bloqueada(entrada, inicio, resultado)
             return
 
+        # Com a interceptação, o prefixo (ClientHello ou requisição) vai para o interceptador.
+        interceptar = self.interceptador.ativo
         try:
             # Conecta ao IP original para não depender de uma nova resolução de DNS.
             leitor_destino, escritor_destino = await self._conectar_destino(resultado, rota, host, porta, entrada)
-            if prefixo:
+            if prefixo and not interceptar:
                 escritor_destino.write(prefixo)
                 await escritor_destino.drain()
         except Exception as exc:
@@ -742,7 +765,8 @@ class MotorProxy:
         if prefixo:
             self._contar(len(prefixo), enviado=True, via_proxy=resultado.tipo_acao == "proxy")
         await self._tunelar(leitor, escritor, leitor_destino, escritor_destino, resultado, rota, entrada, inicio,
-                            ja_enviados=len(prefixo))
+                            ja_enviados=len(prefixo), interceptar=interceptar,
+                            prefixo_cliente=prefixo if interceptar else b"")
 
     # -- UDP --------------------------------------------------------------------------
 
@@ -888,14 +912,27 @@ class MotorProxy:
     async def _tunelar(self, leitor: asyncio.StreamReader, escritor: asyncio.StreamWriter,
                        leitor_destino: asyncio.StreamReader, escritor_destino: asyncio.StreamWriter,
                        resultado: Resultado, rota: Optional[Rota], entrada: EntradaLog, inicio: float,
-                       ja_enviados: int = 0) -> None:
+                       ja_enviados: int = 0, interceptar: Optional[bool] = None,
+                       prefixo_cliente: bytes = b"") -> None:
+        """`interceptar`: decidido por quem chama quando ele já leu bytes do aplicativo; esses bytes
+        vêm em `prefixo_cliente` (sem a interceptação, quem chama já os enviou ao destino)."""
+        if interceptar is None:
+            interceptar = self.interceptador.ativo
         self.conexoes_ativas += 1
         self._escritores_ativos.update((escritor, escritor_destino))
         if resultado.tipo_acao == "proxy" and rota is not None:
             self._tuneis_proxy[entrada.id] = (rota.id, self._chave_rota(rota), (escritor, escritor_destino))
+        via_proxy = resultado.tipo_acao == "proxy"
         try:
-            enviados, recebidos = await self._encaminhar(
-                leitor, escritor, leitor_destino, escritor_destino, via_proxy=resultado.tipo_acao == "proxy")
+            if interceptar:
+                enviados, recebidos = await self.interceptador.atender(
+                    leitor, escritor, leitor_destino, escritor_destino, host=entrada.host_destino,
+                    porta=entrada.porta_destino, processo=entrada.nome_processo, id_conexao=entrada.id,
+                    prefixo_cliente=prefixo_cliente,
+                    contar=lambda n, enviado: self._contar(n, enviado, via_proxy))
+            else:
+                enviados, recebidos = await self._encaminhar(
+                    leitor, escritor, leitor_destino, escritor_destino, via_proxy=via_proxy)
         finally:
             self.conexoes_ativas -= 1
             self._escritores_ativos.discard(escritor)

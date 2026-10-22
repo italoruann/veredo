@@ -19,6 +19,8 @@ dependencies = [
     "psutil>=7.1",
     "platformdirs>=4.0",
     "keyring>=25.0",
+    # Interceptação HTTPS: autoridade certificadora local e certificados por site.
+    "cryptography>=46.0",
     # Modo transparente no Windows (WinDivert). No Linux é usado o nftables do sistema.
     "pydivert>=2.1; sys_platform == 'win32'",
 ]

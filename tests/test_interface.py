@@ -550,3 +550,37 @@ def test_sair_para_o_motor_do_servico(window):
     finally:
         window.ctx.motor = motor_local
     assert chamadas == ["parar", "desconectar"]
+
+
+def test_inspetor_mostra_fluxos_filtra_e_liga_a_interceptacao(window):
+    from proxy_manager.nucleo.interceptacao.fluxos import Fluxo
+
+    window.abrir_inspetor()
+    inspetor = window.inspetor
+    assert inspetor.pilha_lista.currentIndex() == 1  # ajuda enquanto não há fluxos
+    ctx = window.ctx
+    ctx.fluxos.adicionar(Fluxo(esquema="https", metodo="POST", host="api.exemplo.com", porta=443,
+                               caminho="/v1/itens", cabecalhos_requisicao=[("Content-Type", "application/json")],
+                               corpo_requisicao=b'{"a":1}', tamanho_requisicao=7, status=201, estado="concluido",
+                               cabecalhos_resposta=[("Content-Type", "application/json")],
+                               corpo_resposta=b'{"ok":true}', tamanho_resposta=11))
+    ctx.fluxos.adicionar(Fluxo(metodo="GET", host="outro.com", porta=80, caminho="/", status=404,
+                               estado="concluido"))
+    ctx._descarregar_pendentes()
+    assert inspetor.modelo.rowCount() == 2 and inspetor.pilha_lista.currentIndex() == 0
+
+    inspetor.tabela.selectRow(0)
+    assert "POST https://api.exemplo.com/v1/itens" in inspetor.painel_requisicao.primeira_linha.text()
+    assert inspetor.painel_resposta.corpo.combo_modo.currentText() == "Automático"
+    assert '"ok": true' in inspetor.painel_resposta.corpo.texto.toPlainText()  # JSON formatado
+
+    inspetor.campo_filtro.setText("status:4")
+    assert inspetor.modelo.rowCount() == 1 and inspetor.modelo.fluxo_em(0).host == "outro.com"
+    inspetor.campo_filtro.setText("")
+
+    inspetor.acao_interceptar.setChecked(True)
+    assert ctx.configuracao.preferencias.interceptacao_ativa
+    inspetor.acao_interceptar.setChecked(False)
+    assert not ctx.configuracao.preferencias.interceptacao_ativa
+    inspetor.limpar()
+    assert inspetor.modelo.rowCount() == 0

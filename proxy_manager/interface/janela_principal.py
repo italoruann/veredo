@@ -19,6 +19,7 @@ from ..nucleo import arquivo_perfil, teste_vazamento
 from ..nucleo.configuracao import NOME_EXIBICAO
 from .contexto import Contexto
 from .icone import desenhar_icone
+from .janela_interceptacao import JanelaInterceptacao
 from .modelo_conexoes import (
     COL_APP, COL_RECEBIDO, COL_REGRA, COL_ENVIADO, COL_ESTADO, COL_DESTINO, FILTRO_PADRAO, formatar_bytes,
 )
@@ -98,6 +99,7 @@ class JanelaPrincipal(QMainWindow):
 
         self.log = VisualizadorLog()
         self.setCentralWidget(self.log)
+        self.inspetor: Optional[JanelaInterceptacao] = None
 
         self.contadores = ContadoresSessao()
         self._base_estatisticas = self._totais_motor()
@@ -186,6 +188,9 @@ class JanelaPrincipal(QMainWindow):
         self.acao_teste_vazamento = self._acao("&Testar vazamentos...", self.testar_vazamentos,
                                                dica="Abre no navegador uma página que confere o IP visto "
                                                     "pelos sites, o IPv6, o WebRTC e o DNS")
+        self.acao_inspetor = self._acao("Inspetor de &tráfego...", self.abrir_inspetor, "Ctrl+I",
+                                        "Intercepta HTTP/HTTPS e mostra cada requisição e resposta, "
+                                        "com cabeçalhos e corpos", icone_linha("inspect"))
         self.acao_importar_perfil = self._acao("&Importar perfil...", self.importar_perfil,
                                                dica="Carrega proxies, cadeias e regras de um arquivo "
                                                     "do Veredo (.json) ou do Proxifier (.ppx)",
@@ -232,6 +237,7 @@ class JanelaPrincipal(QMainWindow):
         menu_arquivo = self.barra_menus.addMenu("&Arquivo")
         menu_arquivo.addAction(self.acao_motor)
         menu_arquivo.addAction(self.acao_teste_vazamento)
+        menu_arquivo.addAction(self.acao_inspetor)
         menu_arquivo.addSeparator()
         menu_arquivo.addAction(self.acao_importar_perfil)
         menu_arquivo.addAction(self.acao_exportar_perfil)
@@ -295,6 +301,8 @@ class JanelaPrincipal(QMainWindow):
         botao_proxy_padrao.setMenu(self.menu_proxy_padrao)
         botao_proxy_padrao.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self.barra_principal.addWidget(botao_proxy_padrao)
+        self.barra_principal.addSeparator()
+        self.barra_principal.addAction(self.acao_inspetor)
         self.addToolBar(Qt.ToolBarArea.TopToolBarArea, self.barra_principal)
 
     def _criar_painel(self, titulo: str, nome: str, corpo: QWidget, icone: QIcon) -> QDockWidget:
@@ -646,6 +654,15 @@ class JanelaPrincipal(QMainWindow):
         QDesktopServices.openUrl(QUrl(url))
         self.log.mensagem(f"Teste de vazamento aberto no navegador padrão. Para testar outro navegador, "
                           f"abra {url} nele.")
+
+    def abrir_inspetor(self) -> None:
+        # Criado na primeira vez; os fluxos chegam ao modelo mesmo com a janela fechada.
+        if self.inspetor is None:
+            self.inspetor = JanelaInterceptacao(self.ctx, self)
+            self.inspetor.setWindowFlag(Qt.WindowType.Window)
+        self.inspetor.show()
+        self.inspetor.raise_()
+        self.inspetor.activateWindow()
 
     def _salvar_log(self) -> None:
         caminho, _ = QFileDialog.getSaveFileName(self, "Salvar log", "veredo.log", "Log (*.log *.txt)")

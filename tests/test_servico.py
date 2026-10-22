@@ -163,3 +163,21 @@ def test_executavel_empacotado_usa_a_propria_pasta(monkeypatch, tmp_path):
     unidade = servico.unidade_systemd()
     assert f"ExecStart={executavel} --servico" in unidade
     assert f"WorkingDirectory={tmp_path}" in unidade
+
+
+def test_fluxos_interceptados_e_certificado_chegam_a_janela(pasta_servico):
+    from proxy_manager.nucleo.interceptacao.fluxos import Fluxo
+
+    with _Servico(_configuracao()) as srv:
+        remoto = servico.MotorRemoto(Registro(dias_retencao=1), PORTA_CONTROLE)
+        try:
+            assert _esperar(lambda: remoto._conectado or remoto._sock is not None)
+            time.sleep(0.2)  # a inscrição do "acompanhar" precisa chegar antes do evento
+            fluxo = srv.motor.fluxos.adicionar(Fluxo(metodo="GET", host="exemplo.com", caminho="/",
+                                                     corpo_resposta=b"\x00binario"))
+            srv.motor.fluxos.atualizar(fluxo, status=200, estado="concluido")
+            assert _esperar(lambda: (f := remoto.fluxos.obter(fluxo.id)) is not None and f.status == 200)
+            assert remoto.fluxos.obter(fluxo.id).corpo_resposta == b"\x00binario"
+            assert remoto.certificado_ca() == srv.motor.certificado_ca()
+        finally:
+            remoto.desconectar()

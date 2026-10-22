@@ -151,6 +151,12 @@ class Preferencias:
     # UDP pelas regras (só no modo transparente): cada fluxo UDP vai direto, é bloqueado ou passa
     # por um proxy SOCKS5, como o TCP. Desligado, só o QUIC é bloqueado.
     udp_pelas_regras: bool = False
+    # Interceptação: as conexões liberadas pelas regras têm o HTTP/HTTPS decifrado e registrado.
+    interceptacao_ativa: bool = False
+    interceptacao_hosts: str = ""  # vazio = todos os hosts
+    interceptacao_excecoes: str = ""
+    interceptacao_limite_corpo_kb: int = 1024  # por corpo; o resto é repassado sem ser guardado
+    interceptacao_verificar_destino: bool = True  # recusar certificados inválidos dos servidores
 
     @property
     def dns_ativo(self) -> bool:

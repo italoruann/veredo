@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from .configuracao import NOME_APP, Configuracao
+from .interceptacao.fluxos import ArmazemFluxos, Fluxo
 from .registro import EntradaLog, Registro
 
 PORTA_CONTROLE = 58098
@@ -123,6 +124,7 @@ class ServidorControle:
         motor.ao_mudar_estado = self._ao_mudar_estado
         motor.ao_mudar_ip_saida = self._ao_mudar_ip_saida
         registro.inscrever(self._ao_registrar)
+        motor.fluxos.inscrever(self._ao_interceptar)
 
     async def iniciar(self, porta: int = PORTA_CONTROLE) -> None:
         self._loop = asyncio.get_running_loop()
@@ -156,6 +158,9 @@ class ServidorControle:
 
     def _ao_registrar(self, evento: str, entrada: EntradaLog) -> None:
         self._difundir({"tipo": "log", "evento": evento, "entrada": asdict(entrada)})
+
+    def _ao_interceptar(self, _evento: str, fluxo: Fluxo) -> None:
+        self._difundir({"tipo": "fluxo", "fluxo": fluxo.para_dict()})
 
     def _contadores(self) -> dict:
         m = self.motor
@@ -215,6 +220,10 @@ class ServidorControle:
         if comando == "restaurar_ips":
             self.motor.restaurar_ips_saida(dict(pedido.get("ips", {})))
             return {"ok": True}
+        if comando == "certificado_ca":
+            if pedido.get("recriar"):
+                await asyncio.to_thread(self.motor.recriar_ca)
+            return {"pem": (await asyncio.to_thread(self.motor.certificado_ca)).decode("ascii")}
         raise ErroServico(f"comando desconhecido: {comando}")
 
     async def _acompanhar(self, escritor: asyncio.StreamWriter) -> None:
@@ -297,9 +306,11 @@ class MotorRemoto:
 
     remoto = True
 
-    def __init__(self, registro: Registro, porta: int = PORTA_CONTROLE):
+    def __init__(self, registro: Registro, porta: int = PORTA_CONTROLE,
+                 fluxos: Optional[ArmazemFluxos] = None):
         self.registro = registro
         self.porta = porta
+        self.fluxos = fluxos if fluxos is not None else ArmazemFluxos()
         self.ao_mudar_estado: Optional[Callable[[bool, str], None]] = None
         self.ao_mudar_ip_saida: Optional[Callable[[str, str, str], None]] = None
         self._ativo = False
@@ -352,6 +363,13 @@ class MotorRemoto:
             self._pedir("restaurar_ips", ips=ips)
         except (OSError, ValueError, ErroServico):
             pass
+
+    def certificado_ca(self) -> bytes:
+        """Levanta ErroServico/OSError se o serviço não responder."""
+        return self._pedir("certificado_ca")["pem"].encode("ascii")
+
+    def recriar_ca(self) -> None:
+        self._pedir("certificado_ca", recriar=True)
 
     def desconectar(self) -> None:
         """Fecha a janela sem parar o serviço."""
@@ -416,6 +434,8 @@ class MotorRemoto:
                 self.registro.adicionar(EntradaLog(**dados))
             elif self.registro.atualizar(dados["id"], **dados) is None:
                 self.registro.adicionar(EntradaLog(**dados))  # a janela abriu com a conexão em andamento
+        elif tipo == "fluxo":
+            self.fluxos.receber(Fluxo.de_dict(mensagem["fluxo"]))
 
 
 # -- instalação ----------------------------------------------------------------------------------

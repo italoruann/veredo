@@ -13,6 +13,10 @@ from .teste_vazamento import CAMINHO_TESTE
 
 FornecedorPac = Callable[[], str]
 FornecedorPagina = Callable[[], Awaitable[str]]
+FornecedorCertificado = Callable[[], bytes]
+
+# Certificado da CA da interceptação, para instalar em navegadores e outros aparelhos.
+CAMINHO_CERTIFICADO_CA = "/veredo-ca.crt"
 
 
 def gerar_script_pac(porta_socks: int, porta_http: int) -> str:
@@ -30,8 +34,10 @@ function FindProxyForURL(url, host) {{
 
 
 async def iniciar_servidor_pac(fornecedor_pac: FornecedorPac, porta: int,
-                               fornecedor_teste: Optional[FornecedorPagina] = None) -> asyncio.AbstractServer:
-    """Serve o PAC em qualquer caminho e, em `CAMINHO_TESTE`, a página de teste de vazamento."""
+                               fornecedor_teste: Optional[FornecedorPagina] = None,
+                               fornecedor_ca: Optional[FornecedorCertificado] = None) -> asyncio.AbstractServer:
+    """Serve o PAC em qualquer caminho, em `CAMINHO_TESTE` a página de teste de vazamento e em
+    `CAMINHO_CERTIFICADO_CA` o certificado da CA da interceptação."""
     async def atender(leitor: asyncio.StreamReader, escritor: asyncio.StreamWriter) -> None:
         try:
             cabecalho = await asyncio.wait_for(leitor.readuntil(b"\r\n\r\n"), timeout=5)
@@ -47,6 +53,13 @@ async def iniciar_servidor_pac(fornecedor_pac: FornecedorPac, porta: int,
                 escritor.close()
                 return
             tipo = b"text/html; charset=utf-8\r\nCache-Control: no-store"
+        elif fornecedor_ca is not None and caminho == CAMINHO_CERTIFICADO_CA:
+            try:
+                corpo = await asyncio.to_thread(fornecedor_ca)
+            except Exception:
+                escritor.close()
+                return
+            tipo = b"application/x-x509-ca-cert\r\nContent-Disposition: attachment; filename=veredo-ca.crt"
         else:
             corpo = fornecedor_pac().encode("utf-8")
             tipo = b"application/x-ns-proxy-autoconfig"
