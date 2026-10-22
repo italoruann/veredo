@@ -203,6 +203,10 @@ class MotorProxy:
             self._pronto.set()
             loop.run_forever()
         except Exception as exc:
+            # Sem isso, as portas abertas antes da falha (por exemplo, a SOCKS quando o modo
+            # transparente não liga) ficavam presas: ninguém as atendia e a próxima tentativa
+            # de iniciar esbarrava em "address already in use".
+            loop.run_until_complete(self._fechar_portas_abertas())
             self._pronto.set()
             self._emitir_estado(False, f"Falha ao iniciar o motor: {exc}")
         finally:
@@ -237,6 +241,18 @@ class MotorProxy:
 
         self._chaves_perfis = {perfil.id: self._chave_cache_ip(perfil) for perfil in self.configuracao.proxies}
         self._emitir_estado(True, "Motor iniciado")
+
+    async def _fechar_portas_abertas(self) -> None:
+        """Desfaz um _iniciar_servidores() que falhou no meio."""
+        for servidor in (self._servidor_socks, self._servidor_http, self._servidor_pac):
+            try:
+                await _fechar_servidor(servidor)
+            except Exception:
+                pass
+        self._servidor_socks = self._servidor_http = self._servidor_pac = None
+        if self.udp is not None:
+            self.udp.parar()
+            self.udp = None
 
     def _texto_pac(self) -> str:
         prefs = self.configuracao.preferencias

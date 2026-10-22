@@ -56,6 +56,35 @@ def test_backend_transparente_acompanha_motor(monkeypatch):
     asyncio.run(cenario())
 
 
+def test_falha_do_transparente_libera_as_portas(monkeypatch):
+    """Se o backend não liga, as portas SOCKS/HTTP/PAC já abertas são fechadas e o motor
+    consegue ser iniciado de novo, sem "address already in use"."""
+    class _BackendQueFalha(_BackendTransparenteFalso):
+        def iniciar(self):
+            return False, "nft indisponível (falso)"
+
+    backend = _BackendQueFalha(destino_fixo=("127.0.0.1", 1))
+    monkeypatch.setattr(engine_module, "_criar_backend_transparente", lambda port: backend)
+    motor, _registro = _criar_motor_transparente("* +direct\n", backend)
+    estados = []
+    motor.ao_mudar_estado = lambda ativo, mensagem: estados.append((ativo, mensagem))
+
+    motor.iniciar()
+    motor._thread.join(timeout=5)
+    assert not motor.em_execucao()
+    # No Windows o loop fecha os sockets de escuta junto; no Linux, não: o motor tem que fechá-los.
+    assert motor._servidor_socks is None and motor._servidor_http is None and motor._servidor_pac is None
+
+    backend_bom = _BackendTransparenteFalso(destino_fixo=("127.0.0.1", 1))
+    monkeypatch.setattr(engine_module, "_criar_backend_transparente", lambda port: backend_bom)
+    motor.iniciar()
+    try:
+        assert motor.em_execucao()
+        assert estados[-1] == (True, "Motor iniciado")
+    finally:
+        motor.parar()
+
+
 def test_transparente_direto_usa_destino_original(monkeypatch):
     async def cenario():
         servidor_destino, porta_destino = await _iniciar_servidor_destino(b"via transparente")

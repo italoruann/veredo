@@ -39,6 +39,9 @@ NOME_UNIDADE = "veredo.service"
 CAMINHO_UNIDADE = Path("/etc/systemd/system") / NOME_UNIDADE
 # Configurações e contadores enviados ao cliente que acompanha o serviço.
 INTERVALO_CONTADORES = 1.0
+# Novas tentativas de ligar o motor no boot, se a primeira falhar.
+TENTATIVAS_BOOT = 24
+INTERVALO_TENTATIVA_BOOT = 5.0
 LIMITE_LINHA = 16 * 1024 * 1024
 
 
@@ -118,6 +121,7 @@ class ServidorControle:
         self.salvar = salvar
         self.ativo = False
         self.mensagem = ""
+        self.comandado = False  # a janela já mandou ligar ou parar o motor
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._servidor: Optional[asyncio.AbstractServer] = None
         self._ouvintes: set[asyncio.Queue] = set()
@@ -201,9 +205,11 @@ class ServidorControle:
         if comando == "estado":
             return {**self._estado(), **self._contadores()}
         if comando == "iniciar":
+            self.comandado = True
             await asyncio.to_thread(self.motor.iniciar)
             return self._estado()
         if comando == "parar":
+            self.comandado = True
             await asyncio.to_thread(self.motor.parar)
             return self._estado()
         if comando == "configurar":
@@ -265,8 +271,28 @@ def executar_servico(porta_controle: int = PORTA_CONTROLE) -> int:
                 loop.add_signal_handler(sig, parar.set)
             except (NotImplementedError, RuntimeError):
                 signal.signal(sig, lambda *_: loop.call_soon_threadsafe(parar.set))
-        await asyncio.to_thread(motor.iniciar)
+        # O estado do motor vai também para o journal: sem a janela aberta, era o único lugar
+        # onde uma falha no boot ficaria visível.
+        avisar_janela = motor.ao_mudar_estado
+
+        def ao_mudar_estado(ativo: bool, mensagem: str) -> None:
+            print(f"{NOME_APP}: {mensagem}", flush=True)
+            avisar_janela(ativo, mensagem)
+
+        motor.ao_mudar_estado = ao_mudar_estado
         print(f"{NOME_APP}: serviço ativo; canal de controle em 127.0.0.1:{porta_controle}", flush=True)
+        await asyncio.to_thread(motor.iniciar)
+        # No boot a rede (e o resolv.conf) pode ainda não estar pronta: tenta de novo por um
+        # tempo, até a janela assumir o controle ligando ou parando o motor.
+        for _ in range(TENTATIVAS_BOOT):
+            if motor.em_execucao() or controle.comandado or parar.is_set():
+                break
+            try:
+                await asyncio.wait_for(parar.wait(), timeout=INTERVALO_TENTATIVA_BOOT)
+            except asyncio.TimeoutError:
+                pass
+            if not (motor.em_execucao() or controle.comandado or parar.is_set()):
+                await asyncio.to_thread(motor.iniciar)
         await parar.wait()
         await controle.parar()
         await asyncio.to_thread(motor.parar)
