@@ -39,8 +39,29 @@ def main() -> None:
     sys.exit(app.exec())
 
 
+AJUDA = """\
+Uso: veredo [opção]   (ou: uv run python -m proxy_manager [opção])
+
+Sem opção, abre a janela do Veredo.
+
+  --minimizado          abre direto na bandeja (se o ícone na bandeja estiver ativado)
+  --servico             roda só o motor, sem janela, até receber SIGTERM/Ctrl+C; é o que o
+                        serviço do sistema executa
+  --instalar-servico    registra o motor como serviço (systemd no Linux, tarefa agendada como
+                        SYSTEM no Windows) e o inicia; exige root/administrador
+  --remover-servico     para e remove o serviço; exige root/administrador
+  -h, --help            mostra esta ajuda
+
+Portas locais padrão: SOCKS5 58080, HTTP 58081, PAC e teste de vazamento 58090
+(http://127.0.0.1:58090/teste). Detalhes no README.md."""
+
+
 def _executar_comando_servico(argumentos: list[str]) -> bool:
-    """Modo serviço e instalação dele, sem carregar o Qt. True se tratou a linha de comando."""
+    """Ajuda, modo serviço e instalação dele, sem carregar o Qt. True se tratou a linha de comando."""
+    if "--help" in argumentos or "-h" in argumentos:
+        print(AJUDA)
+        sys.exit(0)
+
     from .nucleo import servico
 
     if "--servico" in argumentos:

@@ -87,11 +87,11 @@ class Contexto(QObject):
         self.estado_mudou.emit(False, "Motor parado")
 
     def encerrar(self) -> None:
-        """Ao fechar a janela: para o motor local; o serviço continua rodando."""
+        """Ao fechar o app: para o motor, local ou do serviço. O serviço continua rodando, com o
+        motor parado, até a janela ligá-lo de novo (ou até o próximo boot)."""
+        self.motor.parar()
         if self.usando_servico:
             self.motor.desconectar()
-        else:
-            self.motor.parar()
 
     def _ao_registrar(self, evento: str, entrada: EntradaLog) -> None:
         # Thread do motor: só enfileira.

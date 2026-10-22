@@ -6,14 +6,55 @@
 #   .\scripts\build_windows.ps1 -Root    -> como -Admin, e instala em C:\Program Files\Veredo com
 #                                           atalho no menu Iniciar (pede UAC para instalar)
 #   .\scripts\build_windows.ps1 -Uninstall -> fecha o app e remove a instalacao
+#   .\scripts\build_windows.ps1 -Help    -> explica cada opcao (tambem --help)
 #
 # Usa o uv se estiver instalado; senao cria/usa o .venv com o pip.
 param(
     [switch]$Admin,
     [switch]$Root,
-    [switch]$Uninstall
+    [switch]$Uninstall,
+    [switch]$Help,
+    # Recebe o que nao e parametro do PowerShell, como --help.
+    [Parameter(ValueFromRemainingArguments = $true)][string[]]$Extra
 )
 $ErrorActionPreference = "Stop"
+
+$Usage = @"
+Uso: .\scripts\build_windows.ps1 [opcoes]
+
+Gera dist\Veredo.exe, um executavel que roda sem Python instalado, e opcionalmente o instala.
+Antes de comecar, sempre fecha o Veredo aberto e apaga o build anterior.
+
+Opcoes:
+  (nenhuma)    So gera dist\Veredo.exe. Roda como usuario comum: modo explicito (PAC), sem o
+               modo transparente.
+
+  -Admin       Gera o executavel que pede administrador (UAC) toda vez que abre, com o modo
+               transparente liberado. Nao instala: fica em dist\.
+
+  -Root        Como -Admin, e instala em C:\Program Files\Veredo (pasta em que so o
+               administrador escreve), com atalho 'Veredo' no menu Iniciar. Pede o UAC uma vez
+               para instalar e depois a cada abertura; o app roda como administrador, com
+               todas as opcoes avancadas (modo transparente, DNS pelo proxy, prevencao de
+               vazamento).
+
+  -Uninstall   Fecha o Veredo e remove a instalacao e o atalho do menu Iniciar.
+
+  -Help        Mostra esta ajuda (tambem: --help, -h).
+
+Se o Veredo estiver aberto como administrador, o script pede o UAC para fecha-lo.
+Usa o uv se estiver instalado; senao cria o .venv com o pip.
+"@
+
+$Unknown = @($Extra | Where-Object { $_ })
+if ($Help -or ($Unknown | Where-Object { $_ -in @("--help", "-help", "/?", "/help") })) {
+    Write-Host $Usage
+    exit 0
+}
+if ($Unknown) {
+    Write-Host "Opcao desconhecida: $($Unknown -join ' ') (use -Help)" -ForegroundColor Red
+    exit 1
+}
 if ($Root) { $Admin = $true }
 
 $RepoRoot = Split-Path -Parent $PSScriptRoot

@@ -18,6 +18,45 @@
 # Usa o uv se estiver instalado; senao cria/usa o .venv com o pip.
 set -e
 
+usage() {
+    cat <<'AJUDA'
+Uso: ./scripts/build_linux.sh [opcoes]
+
+Gera dist/veredo, um executavel que roda sem Python instalado, e opcionalmente o instala.
+Antes de comecar, sempre fecha o Veredo aberto e apaga o build anterior. Rode no proprio Linux
+(o PyInstaller nao faz cross-compile).
+
+Opcoes:
+  (nenhuma)          So gera dist/veredo.
+
+  --install          Instala para o seu usuario em ~/.local/share/veredo, com atalho no menu.
+                     Nao pede sudo. Roda como usuario comum: modo explicito (PAC), sem o modo
+                     transparente.
+
+  --install --admin  Instala em /opt/veredo (pede sudo). O atalho abre pelo pkexec e pede a
+                     senha toda vez; a janela roda como root, com o modo transparente.
+
+  --root             Instala em /opt/veredo e registra o motor como servico do systemd
+                     (veredo.service), rodando como root desde o boot. O sudo e pedido uma vez,
+                     na instalacao; o atalho abre so a janela, sem senha, e ela controla o
+                     servico. Sair do Veredo para o motor; ele volta no proximo boot ou pela
+                     janela.
+
+  --uninstall        Fecha o Veredo e remove todas as instalacoes, o servico e o inicio
+                     automatico.
+
+  -h, --help         Mostra esta ajuda.
+
+Cada --install/--root remove antes as instalacoes anteriores, para nunca ficarem duas no menu.
+Usa o uv se estiver instalado; senao cria o .venv com o pip.
+
+Conferir depois de instalar:
+  systemctl status veredo.service      estado do servico (--root)
+  journalctl -u veredo.service -f      log do servico (--root)
+  ~/.local/state/veredo/veredo.log     log do atalho com pkexec (--install --admin)
+AJUDA
+}
+
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
@@ -31,7 +70,7 @@ for arg in "$@"; do
         --admin) ADMIN=1 ;;
         --root) INSTALL=1; SERVICO=1 ;;
         --uninstall) UNINSTALL=1 ;;
-        -h|--help) sed -n '2,18p' "$0"; exit 0 ;;
+        -h|--help) usage; exit 0 ;;
         *) echo "Opcao desconhecida: $arg (use --help)" >&2; exit 1 ;;
     esac
 done

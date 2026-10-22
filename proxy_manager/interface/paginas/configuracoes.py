@@ -463,7 +463,8 @@ class PaginaConfiguracoes(QWidget):
             f"Roda o motor como serviço, iniciado com o computador e antes de qualquer login, "
             f"sem a janela aberta. A janela passa a controlar o serviço e envia a ele a "
             f"configuração (inclusive as senhas, guardadas num arquivo que só o administrador "
-            f"lê). Fechar o {NOME_EXIBICAO} não para o serviço. Pede permissão de administrador."
+            f"lê). Fechar o {NOME_EXIBICAO} para o motor, que volta a ligar no próximo boot ou "
+            f"pela janela. Pede permissão de administrador."
         )
         dica.setWordWrap(True)
         dica.setObjectName("DicaCartao")

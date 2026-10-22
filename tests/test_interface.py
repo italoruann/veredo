@@ -529,3 +529,24 @@ def test_proxy_sistema_acompanha_motor(window, monkeypatch):
     chamadas.clear()
     ctx.motor.parar()
     assert any(c[0] == "remove" for c in chamadas), "deveria remover o proxy do sistema antes de stop() retornar"
+
+
+def test_sair_para_o_motor_do_servico(window):
+    chamadas = []
+
+    class MotorRemotoFalso:
+        remoto = True
+
+        def parar(self):
+            chamadas.append("parar")
+
+        def desconectar(self):
+            chamadas.append("desconectar")
+
+    motor_local = window.ctx.motor
+    window.ctx.motor = MotorRemotoFalso()
+    try:
+        window.ctx.encerrar()
+    finally:
+        window.ctx.motor = motor_local
+    assert chamadas == ["parar", "desconectar"]

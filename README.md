@@ -191,8 +191,10 @@ com essa permissão, ou use o serviço do sistema.
 Em **Configurações > Serviço do sistema**, **Instalar serviço** faz o motor rodar sem a janela,
 iniciado com o computador e antes de qualquer login. No Windows é uma tarefa agendada que roda
 como SYSTEM; no Linux, a unidade `veredo.service` do systemd. A janela passa a controlar o
-serviço: liga e desliga o motor, envia a configuração e mostra o log ao vivo. Fechar a janela
-não para o serviço.
+serviço: liga e desliga o motor, envia a configuração e mostra o log ao vivo. Sair do Veredo
+para o motor (e desfaz o proxy do sistema); o serviço continua ativo e volta a ligar o motor no
+próximo boot ou quando você o inicia pela janela. Com o ícone na bandeja ativado, fechar a janela
+só a esconde e o motor continua ligado.
 
 Também dá para usar pela linha de comando (como administrador/root):
 
@@ -219,6 +221,7 @@ aberto e apagam o build anterior antes de começar.
 .\scripts\build_windows.ps1 -Admin   # pede permissão de administrador ao abrir (modo transparente)
 .\scripts\build_windows.ps1 -Root    # como -Admin, e instala em Program Files com atalho no menu Iniciar
 .\scripts\build_windows.ps1 -Uninstall  # remove a instalação
+.\scripts\build_windows.ps1 -Help       # explica cada opção (também --help)
 ```
 
 Com `-Root`, o executável é instalado em `C:\Program Files\Veredo`, pasta em que só o
@@ -233,6 +236,7 @@ roda como administrador, com o modo transparente e as demais opções avançadas
 ./scripts/build_linux.sh --install --admin  # instala em /opt e abre pedindo senha (modo transparente)
 ./scripts/build_linux.sh --root             # instala em /opt com o motor como serviço root
 ./scripts/build_linux.sh --uninstall        # remove as instalações (e o serviço)
+./scripts/build_linux.sh --help             # explica cada opção
 ```
 
 Com `--root`, a senha do `sudo` é pedida uma vez, na instalação. O motor passa a rodar como root
