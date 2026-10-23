@@ -208,3 +208,69 @@ def test_sockets_udp_do_windows_suportam_sendto_assincrono():
             b.close()
 
     asyncio.run(cenario())
+
+
+def test_hosts_do_teste_de_conectividade_do_networkmanager(tmp_path):
+    pasta = tmp_path / "conf.d"
+    pasta.mkdir()
+    (pasta / "20-connectivity-fedora.conf").write_text(
+        "[connectivity]\nuri=http://fedoraproject.org/static/hotspot.txt\ninterval=300\n", encoding="utf-8")
+    principal = tmp_path / "NetworkManager.conf"
+    # "uri=" fora da seção [connectivity] não conta
+    principal.write_text("[main]\nuri=http://outro.exemplo/\n"
+                         "[connectivity]\nuri=http://nmcheck.gnome.org/check_network_status.txt\n", encoding="utf-8")
+
+    hosts = dns.hosts_teste_conectividade((str(principal), str(pasta), str(tmp_path / "nao-existe")))
+
+    assert hosts == ["nmcheck.gnome.org", "fedoraproject.org"]
+
+
+class _UpstreamSoIpv6(_UpstreamFalso):
+    """Responde só as consultas AAAA; as consultas A ficam sem resposta, ou recebem uma resposta
+    vazia com `a_vazio`."""
+    def __init__(self, a_vazio: bool):
+        super().__init__()
+        self.a_vazio = a_vazio
+
+    def datagram_received(self, dados, endereco):
+        lida = dns.ler_consulta(dados)
+        self.nomes.append(lida.nome)
+        if lida.tipo == dns.TIPO_AAAA:
+            self.transporte.sendto(dns.montar_resposta(
+                lida, respostas=[(dns.TIPO_AAAA, ipaddress.IPv6Address("2001:db8::1").packed)]), endereco)
+        elif self.a_vazio:
+            self.transporte.sendto(dns.montar_resposta(lida), endereco)
+
+
+def test_resolvedor_real_so_usa_ipv6_quando_o_nome_nao_tem_ipv4():
+    async def cenario(a_vazio: bool) -> list[str]:
+        upstream = _UpstreamSoIpv6(a_vazio)
+        transporte, _ = await asyncio.get_running_loop().create_datagram_endpoint(
+            lambda: upstream, local_addr=("127.0.0.1", 0))
+        try:
+            real = dns.ResolvedorReal([f"127.0.0.1:{transporte.get_extra_info('sockname')[1]}"], timeout=0.2)
+            return await real.resolver("so-ipv6.exemplo")
+        finally:
+            transporte.close()
+
+    # o servidor disse que não há IPv4: vale o IPv6
+    assert asyncio.run(cenario(a_vazio=True)) == ["2001:db8::1"]
+    # a consulta A ficou sem resposta: não se sabe se há IPv4, então nada de IPv6
+    assert asyncio.run(cenario(a_vazio=False)) == []
+
+
+def test_resolvedor_real_rele_os_servidores_do_sistema(monkeypatch):
+    monkeypatch.setattr(dns, "INTERVALO_RELEITURA_SERVIDORES", 0.0)
+
+    async def cenario():
+        transporte, upstream, porta = await _iniciar_upstream()
+        try:
+            # o servidor da rede anterior não responde mais; o sistema já lista o da rede nova
+            real = dns.ResolvedorReal(["127.0.0.1:9"], timeout=0.2,
+                                      fornecedor_servidores=lambda: [f"127.0.0.1:{porta}"])
+            assert await real.resolver("x.com") == ["127.0.0.1"]
+            assert real.servidores == [f"127.0.0.1:{porta}"]
+        finally:
+            transporte.close()
+
+    asyncio.run(cenario())

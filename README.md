@@ -315,7 +315,10 @@ Secret Service no Linux). Se não houver cofre disponível, ficam no `config.jso
 - Autenticação NTLM/Kerberos em proxies HTTP não é suportada (só usuário e senha).
 - No Linux, o modo transparente não intercepta os programas do mesmo usuário que roda o Veredo
   (é assim que ele evita capturar a si mesmo). Rodando como root ou como serviço, os programas
-  do root saem direto.
+  do root saem direto. A exceção são as conexões a um IP falso do DNS pelo proxy, que sempre
+  passam pelo motor: o cache DNS do sistema é um só, e sem isso esses programas ficariam sem
+  internet. Os hosts do teste de conectividade do NetworkManager recebem o IP real, porque o
+  teste prende a conexão à placa de rede e não pode ser desviado.
 - No Linux, navegadores baseados em Chromium só pegam o proxy quando abertos pelo menu ou por
   um link de outro programa. Pelo terminal, passe `--proxy-pac-url=http://127.0.0.1:58090/proxy.pac`.
 - O modo transparente (Windows e Linux), o DNS pelo proxy, o UDP pelas regras, o serviço do

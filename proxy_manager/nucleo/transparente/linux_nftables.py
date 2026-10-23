@@ -24,6 +24,8 @@ from collections import OrderedDict
 from shutil import which
 from typing import Callable, Optional
 
+from ..dns import REDE_FALSA
+
 NOME_TABELA = "proxymgr"
 _SOL_IP = socket.SOL_IP if hasattr(socket, "SOL_IP") else 0
 _SOL_IPV6 = getattr(socket, "SOL_IPV6", 41)
@@ -79,6 +81,18 @@ def _apagar_tabela() -> None:
         subprocess.run(["nft", "delete", "table", familia, NOME_TABELA], capture_output=True, timeout=5)
 
 
+def _limpar_cache_dns() -> None:
+    """Esvazia o cache do systemd-resolved, que guarda os IPs falsos (e as respostas reais de
+    antes de ligar o DNS pelo proxy). Sem isso, depois de parar o motor os programas continuariam
+    conectando em 198.18.x.x até o TTL vencer."""
+    if which("resolvectl") is None:
+        return
+    try:
+        subprocess.run(["resolvectl", "flush-caches"], capture_output=True, timeout=5)
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+
+
 def _comandos_rotas(acao: str) -> list[list[str]]:
     comandos = []
     for familia, destino in (("-4", "0.0.0.0/0"), ("-6", "::/0")):
@@ -131,9 +145,16 @@ class ModoTransparenteLinux:
             ["nft", "add", "table", "inet", NOME_TABELA],
             ["nft", "add", "chain", "inet", NOME_TABELA, "output",
              "{", "type", "nat", "hook", "output", "priority", "-100", ";", "}"],
-            # O tráfego do próprio app não é redirecionado, senão entraria em loop.
-            regra + ["output", "meta", "skuid", uid, "return"],
         ]
+        if self.porta_dns:
+            # O systemd-resolved não é do nosso uid: as consultas dele vêm para o DNS local e os IPs
+            # falsos ficam no cache que atende todo o sistema, inclusive o nosso uid (no serviço, o
+            # root: NetworkManager, dnf...). Sem este desvio, essas conexões iriam direto a um
+            # endereço que não existe. O motor nunca conecta em IP falso, então não há loop.
+            comandos.append(regra + ["output", "ip", "daddr", str(REDE_FALSA), "meta", "l4proto", "tcp",
+                                     "redirect", "to", f":{self.porta_transparente}"])
+        # O tráfego do próprio app não é redirecionado, senão entraria em loop.
+        comandos.append(regra + ["output", "meta", "skuid", uid, "return"])
         if self.porta_dns:
             # Antes da exceção de loopback: pega também as consultas ao systemd-resolved (127.0.0.53).
             comandos.append(regra + ["output", "udp", "dport", "53", "redirect", "to", f":{self.porta_dns}"])
@@ -160,10 +181,16 @@ class ModoTransparenteLinux:
     def _comandos_tproxy(self, uid: str) -> list[list[str]]:
         regra = ["nft", "add", "rule", "inet", NOME_TABELA]
         porta = str(self.porta_transparente)
-        return [
+        comandos = [
             # Marca o UDP de saída; a cadeia "route" refaz o roteamento e a marca leva ao loopback.
             ["nft", "add", "chain", "inet", NOME_TABELA, "udp_marca",
              "{", "type", "route", "hook", "output", "priority", "mangle", ";", "}"],
+        ]
+        if self.porta_dns:
+            # Como no TCP: UDP a um IP falso é desviado mesmo vindo do nosso uid.
+            comandos.append(regra + ["udp_marca", "ip", "daddr", str(REDE_FALSA), "meta", "l4proto", "udp",
+                                     "meta", "mark", "set", MARCA_UDP])
+        return comandos + [
             regra + ["udp_marca", "meta", "skuid", uid, "return"],
             regra + ["udp_marca", "udp", "dport", "53", "return"],
             regra + ["udp_marca", "ip", "daddr", "{", "127.0.0.0/8,", "224.0.0.0/4,", "255.255.255.255", "}", "return"],
@@ -200,6 +227,8 @@ class ModoTransparenteLinux:
             self._fechar_receptores()
             return False, f"Falha ao aplicar regras de nftables: {_erro_comando(exc)}"
 
+        if self.porta_dns:
+            _limpar_cache_dns()
         self._ativo = True
         return True, f"Modo transparente ativo, redirecionando TCP para a porta {self.porta_transparente}."
 
@@ -215,6 +244,8 @@ class ModoTransparenteLinux:
             if self.capturar_udp:
                 _apagar_rotas()
                 self._fechar_receptores()
+            if self.porta_dns:
+                _limpar_cache_dns()
         return True, "Modo transparente desligado; tabela nftables removida."
 
     # -- UDP (TPROXY) ------------------------------------------------------------------------

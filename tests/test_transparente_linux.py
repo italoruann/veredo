@@ -157,7 +157,9 @@ def test_udp_pelas_regras_marca_e_desvia_com_tproxy():
     # com UDP pelas regras nada de UDP é rejeitado: as regras decidem
     assert not [c for c in comandos if "reject" in c]
     marca = [c for c in comandos if "udp_marca" in c and c[2] == "rule"]
-    assert marca[0][-3:] == ["skuid", "1000", "return"]  # o próprio Veredo nunca é desviado
+    # o próprio Veredo nunca é desviado, exceto o que vai a um IP falso (vindo do cache do sistema)
+    assert "198.18.0.0/15" in marca[0]
+    assert marca[1][-3:] == ["skuid", "1000", "return"]
     assert marca[-1][-3:] == ["mark", "set", mod.MARCA_UDP]
     tproxy = [c for c in comandos if "tproxy" in c]
     assert [c[-1] for c in tproxy] == ["127.0.0.1:58095", "[::1]:58095"]
@@ -171,3 +173,32 @@ def test_destino_original_do_datagrama_ipv4_e_ipv6():
     ipv6 = struct.pack("!HHI16sI", socket.AF_INET6, 3478, 0, socket.inet_pton(socket.AF_INET6, "2001:db8::9"), 0)
     assert mod._ler_destino_original([(mod._SOL_IPV6, mod._IPV6_RECVORIGDSTADDR, ipv6)]) == ("2001:db8::9", 3478)
     assert mod._ler_destino_original([]) is None
+
+
+def test_ip_falso_e_desviado_antes_da_excecao_do_proprio_uid():
+    # O systemd-resolved guarda os IPs falsos num cache que atende também o nosso uid (no serviço,
+    # o root do NetworkManager e do dnf); sem o desvio, essas conexões iam direto a 198.18.x.x.
+    comandos = ModoTransparenteLinux(58095, porta_dns=58053).comandos("0")
+    nat = [c for c in comandos if "output" in c and c[:3] == ["nft", "add", "rule"]]
+    indice_falso = next(i for i, c in enumerate(nat) if "198.18.0.0/15" in c)
+    indice_dono = next(i for i, c in enumerate(nat) if "skuid" in c)
+    assert indice_falso < indice_dono
+    assert nat[indice_falso][-3:] == ["redirect", "to", ":58095"]
+    assert "tcp" in nat[indice_falso]
+
+
+def test_sem_dns_pelo_proxy_nao_ha_regra_de_ip_falso():
+    comandos = ModoTransparenteLinux(58095, capturar_udp=True).comandos("0")
+    assert not any("198.18.0.0/15" in c for c in comandos)
+
+
+def test_dns_pelo_proxy_limpa_cache_do_resolved_ao_ligar_e_desligar(root_falso, comandos_registrados):
+    backend = ModoTransparenteLinux(58095, porta_dns=58053)
+
+    backend.iniciar()
+    assert comandos_registrados[-1] == ["resolvectl", "flush-caches"]
+
+    comandos_registrados.clear()
+    backend.parar()
+    assert comandos_registrados == [["nft", "delete", "table", "inet", mod.NOME_TABELA],
+                                    ["resolvectl", "flush-caches"]]

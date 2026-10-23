@@ -460,12 +460,15 @@ class MotorProxy:
         self._desligar_dns()
 
     async def _ligar_dns(self, prefs: Preferencias) -> None:
-        servidores = dns.interpretar_excecoes(prefs.dns_servidores) or dns.servidores_dns_sistema()
+        fixos = dns.interpretar_excecoes(prefs.dns_servidores)
+        servidores = fixos or dns.servidores_dns_sistema()
         if not servidores:
             raise RuntimeError("nenhum servidor DNS encontrado no sistema; informe um nas Configurações")
-        real = dns.ResolvedorReal(servidores)
-        servidor = dns.ServidorDns(self.tabela_dns, real, dns.interpretar_excecoes(prefs.dns_excecoes),
-                                   bloquear_outros=prefs.prevenir_vazamento)
+        real = dns.ResolvedorReal(servidores, fornecedor_servidores=None if fixos else dns.servidores_dns_sistema)
+        excecoes = dns.interpretar_excecoes(prefs.dns_excecoes)
+        if platform.system() == "Linux":
+            excecoes += dns.hosts_teste_conectividade()
+        servidor = dns.ServidorDns(self.tabela_dns, real, excecoes, bloquear_outros=prefs.prevenir_vazamento)
         await servidor.iniciar(prefs.porta_dns)
         self.servidor_dns = servidor
         rede.resolvedor = real.resolver

@@ -19,6 +19,10 @@ from typing import Awaitable, Callable, Optional
 _trava = threading.Lock()
 _portas_proprias: dict[int, int] = {}
 
+# Um endereço que não responde (o SYN se perde) passa a vez ao próximo depois deste tempo; sem isso
+# ele consumiria todo o prazo da conexão e os outros endereços do nome nunca seriam tentados.
+TEMPO_POR_ENDERECO = 3.0
+
 # nome -> endereços IP; None usa o resolvedor do sistema.
 resolvedor: Optional[Callable[[str], Awaitable[list[str]]]] = None
 
@@ -74,7 +78,8 @@ async def _abrir(host: str, porta: int, **kwargs) -> tuple[asyncio.StreamReader,
     loop = asyncio.get_running_loop()
     enderecos = await resolver(host)
     ultimo_erro: OSError | None = None
-    for endereco in enderecos:
+    for indice, endereco in enumerate(enderecos):
+        ultimo = indice == len(enderecos) - 1
         familia = socket.AF_INET6 if ":" in endereco else socket.AF_INET
         sock = socket.socket(familia, socket.SOCK_STREAM)
         porta_local = 0
@@ -83,8 +88,9 @@ async def _abrir(host: str, porta: int, **kwargs) -> tuple[asyncio.StreamReader,
             sock.bind(("::" if familia == socket.AF_INET6 else "0.0.0.0", 0))
             porta_local = sock.getsockname()[1]
             reservar_porta(porta_local)
-            await loop.sock_connect(sock, endereco_socket(endereco, porta))
-        except OSError as exc:
+            await asyncio.wait_for(loop.sock_connect(sock, endereco_socket(endereco, porta)),
+                                   timeout=None if ultimo else TEMPO_POR_ENDERECO)
+        except OSError as exc:  # inclui TimeoutError
             sock.close()
             ultimo_erro = exc
             continue

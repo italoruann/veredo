@@ -17,9 +17,10 @@ import struct
 import threading
 import time
 from collections import OrderedDict
+from urllib.parse import urlsplit
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from . import rede
 from .regras import dividir_alvo, padrao_corresponde
@@ -35,7 +36,10 @@ RCODE_OK = 0
 RCODE_FALHA = 2
 
 REDE_FALSA = ipaddress.ip_network("198.18.0.0/15")
-TTL_FALSO = 300
+# Curto: se o Veredo parar ou cair, o IP falso some logo dos caches (o do sistema e o dos navegadores).
+TTL_FALSO = 10
+# Com a lista de servidores vinda do sistema, ela é relida no máximo a cada tantos segundos.
+INTERVALO_RELEITURA_SERVIDORES = 5.0
 
 EXCECOES_PADRAO = "localhost; *.local; *.lan; *.home.arpa; *.localdomain"
 
@@ -191,6 +195,36 @@ def _servidores_linux() -> list[str]:
     return []
 
 
+# O teste de conectividade do NetworkManager prende o socket à placa de rede (SO_BINDTODEVICE), e
+# um socket assim não pode ser desviado ao loopback: com um IP falso o teste falha e o sistema
+# mostra "sem internet". Os hosts desse teste são resolvidos pelo DNS real.
+_CONFIGS_NETWORKMANAGER = ("/etc/NetworkManager/NetworkManager.conf", "/etc/NetworkManager/conf.d",
+                           "/run/NetworkManager/conf.d", "/usr/lib/NetworkManager/conf.d")
+
+
+def hosts_teste_conectividade(caminhos: tuple[str, ...] = _CONFIGS_NETWORKMANAGER) -> list[str]:
+    """Hosts das URIs `uri=` da seção [connectivity] da configuração do NetworkManager."""
+    arquivos: list[Path] = []
+    for caminho in map(Path, caminhos):
+        arquivos += sorted(caminho.glob("*.conf")) if caminho.is_dir() else [caminho]
+    hosts: list[str] = []
+    for arquivo in arquivos:
+        try:
+            linhas = arquivo.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            continue
+        secao = ""
+        for linha in linhas:
+            linha = linha.strip()
+            if linha.startswith("["):
+                secao = linha.strip("[]").strip().lower()
+            elif secao == "connectivity" and linha.startswith("uri="):
+                host = urlsplit(linha[4:].strip()).hostname
+                if host and host not in hosts:
+                    hosts.append(host)
+    return hosts
+
+
 def _ler_resolv_conf(caminho: str) -> list[str]:
     try:
         linhas = Path(caminho).read_text(encoding="utf-8", errors="replace").splitlines()
@@ -252,12 +286,25 @@ def _servidores_windows() -> list[str]:
 class ResolvedorReal:
     """Consulta servidores DNS diretamente, sem passar pelo cache do sistema."""
 
-    def __init__(self, servidores: list[str], timeout: float = 2.0, validade_cache: float = 60.0):
+    def __init__(self, servidores: list[str], timeout: float = 2.0, validade_cache: float = 60.0,
+                 fornecedor_servidores: Optional[Callable[[], list[str]]] = None):
+        """`fornecedor_servidores` relê a lista do sistema, para acompanhar uma troca de rede (o
+        DNS da rede anterior deixa de responder); sem ele, `servidores` é fixa."""
         self.servidores = servidores
+        self._fornecedor_servidores = fornecedor_servidores
+        self._servidores_lidos_em = time.monotonic()
         self.timeout = timeout
         self.validade_cache = validade_cache
         self._cache: dict[str, tuple[float, list[str]]] = {}
         self._proximo_id = 1
+
+    def _servidores_atuais(self) -> list[str]:
+        agora = time.monotonic()
+        if (self._fornecedor_servidores is not None
+                and agora - self._servidores_lidos_em >= INTERVALO_RELEITURA_SERVIDORES):
+            self._servidores_lidos_em = agora
+            self.servidores = self._fornecedor_servidores() or self.servidores
+        return self.servidores
 
     def _novo_id(self) -> int:
         self._proximo_id = (self._proximo_id % 0xFFFF) + 1
@@ -266,7 +313,7 @@ class ResolvedorReal:
     async def consultar(self, consulta: bytes) -> Optional[bytes]:
         """Envia a consulta crua ao primeiro servidor que responder."""
         loop = asyncio.get_running_loop()
-        for texto in self.servidores:
+        for texto in self._servidores_atuais():
             servidor, porta = dividir_alvo(texto)
             porta = int(porta) if porta.isdigit() else 53
             familia = socket.AF_INET6 if ":" in servidor else socket.AF_INET
@@ -293,7 +340,7 @@ class ResolvedorReal:
         return None
 
     async def resolver(self, nome: str) -> list[str]:
-        """Endereços IPv4 (ou IPv6, se não houver IPv4) de `nome`."""
+        """Endereços IPv4 (ou IPv6, se o nome não tiver IPv4) de `nome`."""
         nome = nome.lower().rstrip(".")
         try:
             ipaddress.ip_address(nome)
@@ -313,7 +360,11 @@ class ResolvedorReal:
             except UnicodeError:
                 return []
             resposta = await self.consultar(consulta)
-            enderecos = ler_enderecos(resposta) if resposta else []
+            if resposta is None:
+                # Sem resposta não se sabe se o nome tem IPv4; cair para o IPv6 daria endereços
+                # que muitas redes não roteiam.
+                break
+            enderecos = ler_enderecos(resposta)
             if enderecos:
                 break
         if enderecos:
