@@ -192,13 +192,10 @@ def test_sem_dns_pelo_proxy_nao_ha_regra_de_ip_falso():
     assert not any("198.18.0.0/15" in c for c in comandos)
 
 
-def test_dns_pelo_proxy_limpa_cache_do_resolved_ao_ligar_e_desligar(root_falso, comandos_registrados):
-    backend = ModoTransparenteLinux(58095, porta_dns=58053)
+def test_dns_pelo_proxy_limpa_cache_ao_ligar(root_falso, comandos_registrados, limpezas_cache_dns):
+    ModoTransparenteLinux(58095).iniciar()
+    assert limpezas_cache_dns == []
 
-    backend.iniciar()
-    assert comandos_registrados[-1] == ["resolvectl", "flush-caches"]
-
-    comandos_registrados.clear()
-    backend.parar()
-    assert comandos_registrados == [["nft", "delete", "table", "inet", mod.NOME_TABELA],
-                                    ["resolvectl", "flush-caches"]]
+    ModoTransparenteLinux(58095, porta_dns=58053).iniciar()
+    # ao parar quem limpa é o motor (em qualquer modo), não o backend
+    assert len(limpezas_cache_dns) == 1

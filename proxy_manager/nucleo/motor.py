@@ -323,6 +323,8 @@ class MotorProxy:
         if self.udp is not None:
             self.udp.parar()
             self.udp = None
+        # Em qualquer modo: IPs falsos e respostas guardadas com o motor ligado não sobrevivem a ele.
+        await asyncio.to_thread(dns.limpar_cache_sistema)
         self._emitir_estado(False, "Motor parado")
 
     # -- mudanças de porta com o motor ligado -----------------------------------------

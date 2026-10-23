@@ -274,3 +274,19 @@ def test_resolvedor_real_rele_os_servidores_do_sistema(monkeypatch):
             transporte.close()
 
     asyncio.run(cenario())
+
+
+def test_limpar_cache_sistema_usa_o_comando_de_cada_sistema(monkeypatch):
+    from tests.conftest import LIMPAR_CACHE_SISTEMA as real
+    comandos = []
+    monkeypatch.setattr(dns.subprocess, "run", lambda comando, **_: comandos.append(comando))
+
+    monkeypatch.setattr(dns.platform, "system", lambda: "Windows")
+    real()
+    monkeypatch.setattr(dns.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(dns, "which", lambda nome: f"/usr/bin/{nome}")
+    real()
+    monkeypatch.setattr(dns, "which", lambda nome: None)
+    real()
+
+    assert comandos == [["ipconfig", "/flushdns"], ["resolvectl", "flush-caches"]]

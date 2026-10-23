@@ -354,3 +354,12 @@ def test_pac_serve_pagina_de_teste_de_vazamento(monkeypatch):
             motor.parar()
 
     asyncio.run(cenario())
+
+
+def test_parar_o_motor_limpa_o_cache_dns(limpezas_cache_dns):
+    """Mesmo no modo explícito: nada do que o sistema guardou com o motor ligado sobrevive a ele."""
+    motor, _registro = _criar_motor("")
+    motor.iniciar()
+    assert limpezas_cache_dns == []
+    motor.parar()
+    assert len(limpezas_cache_dns) == 1

@@ -14,12 +14,14 @@ import ipaddress
 import platform
 import socket
 import struct
+import subprocess
 import threading
 import time
 from collections import OrderedDict
 from urllib.parse import urlsplit
 from dataclasses import dataclass
 from pathlib import Path
+from shutil import which
 from typing import Callable, Optional
 
 from . import rede
@@ -174,6 +176,24 @@ class TabelaIpsFalsos:
 
     def __len__(self) -> int:
         return len(self._por_nome)
+
+
+def limpar_cache_sistema() -> None:
+    """Esvazia o cache DNS do sistema (systemd-resolved no Linux, cliente DNS no Windows), onde podem
+    ter ficado IPs falsos: sem isso, com o motor parado, os programas continuariam conectando em
+    198.18.x.x até o TTL vencer. Também descarta respostas antigas antes de o DNS pelo proxy valer.
+    Não precisa de root/administrador; falhas são ignoradas."""
+    if platform.system() == "Windows":
+        comando = ["ipconfig", "/flushdns"]
+    elif which("resolvectl") is not None:
+        comando = ["resolvectl", "flush-caches"]
+    else:
+        return
+    try:
+        subprocess.run(comando, capture_output=True, timeout=5,
+                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except (subprocess.TimeoutExpired, OSError):
+        pass
 
 
 # -- resolvedor próprio do motor -------------------------------------------------------------
