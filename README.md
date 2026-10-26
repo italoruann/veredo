@@ -1,6 +1,6 @@
 # Veredo
 
-Cliente de proxy para Windows e Linux. Você diz quais programas e quais sites passam pelo
+Cliente de proxy para Windows, Linux e macOS. Você diz quais programas e quais sites passam pelo
 proxy, quais vão direto e quais são bloqueados, e acompanha cada conexão em tempo real.
 
 Funciona com proxies SOCKS5, SOCKS4/4A, HTTP e HTTPS, com ou sem usuário e senha, permite ter
@@ -301,6 +301,30 @@ no serviço `veredo.service`, iniciado com o sistema, e o modo transparente func
 senha. O atalho do menu abre só a janela, como usuário comum, e ela controla o serviço (veja
 [Serviço do sistema](#serviço-do-sistema)).
 
+**macOS** (gera `dist/Veredo.app`; rode no próprio Mac, Intel ou Apple Silicon, macOS 13 ou mais
+novo):
+
+```bash
+./scripts/build_macos.sh               # só gera o app
+./scripts/build_macos.sh --install     # instala em /Applications (ou ~/Applications)
+./scripts/build_macos.sh --uninstall   # remove a instalação
+./scripts/build_macos.sh --help        # explica cada opção
+```
+
+O app sai com assinatura ad hoc, que basta para abrir no próprio Mac. Em outro Mac, o Gatekeeper
+pode pedir para liberar em **Ajustes do Sistema > Privacidade e Segurança > Abrir Mesmo Assim**.
+
+No macOS o Veredo funciona no modo explícito: configure os programas (ou o proxy do sistema, em
+**Ajustes do Sistema > Rede > Detalhes > Proxies**) para o SOCKS5 `127.0.0.1:58080`, o HTTP
+`127.0.0.1:58081` ou o PAC `http://127.0.0.1:58090/proxy.pac`. O modo transparente, o serviço do
+sistema, a configuração automática do proxy do sistema, o início automático e a instalação
+automática do certificado existem só no Windows e no Linux. Sem root, o macOS não informa qual
+programa abriu cada conexão, então as regras por aplicativo (`apps:`) não casam; as regras por
+site funcionam.
+
+O Mac Intel usa o `cryptography` 48: as versões 49 em diante não publicam pacote pronto para
+ele, e o `uv` tentaria compilar do fonte (o que exige Rust e OpenSSL).
+
 ## Onde ficam os dados
 
 Tudo fica na pasta do seu usuário. **Arquivo > Abrir pasta de dados** abre o local certo.
@@ -309,6 +333,7 @@ Tudo fica na pasta do seu usuário. **Arquivo > Abrir pasta de dados** abre o lo
 | ------- | --------------------------------------------------------- |
 | Windows | `%LOCALAPPDATA%\Veredo\Veredo`                            |
 | Linux   | `~/.config/Veredo` (configuração) e `~/.local/share/Veredo` (dados) |
+| macOS   | `~/Library/Application Support/Veredo`                    |
 
 - `config.json`: perfis, aplicativos, regras e preferências (com uma cópia `config.json.bak`).
 - `conexoes.db`: histórico das conexões, apagado automaticamente depois do número de dias

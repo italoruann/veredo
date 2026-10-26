@@ -60,6 +60,11 @@ AJUDA
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
+if [ "$(uname -s)" = "Darwin" ]; then
+    echo "Este script e para Linux. No macOS use ./scripts/build_macos.sh (veja --help)." >&2
+    exit 1
+fi
+
 INSTALL=0
 ADMIN=0
 SERVICO=0

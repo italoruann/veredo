@@ -1,7 +1,7 @@
 [project]
 name = "veredo"
 version = "0.1.0"
-description = "Cliente de proxy para Windows e Linux com regras por aplicativo e por domínio."
+description = "Cliente de proxy para Windows, Linux e macOS com regras por aplicativo e por domínio."
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
@@ -12,6 +12,7 @@ classifiers = [
     "Programming Language :: Python :: 3.14",
     "Operating System :: Microsoft :: Windows",
     "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
 ]
 # Versões mínimas escolhidas por serem as primeiras com wheels para Python 3.14.
 dependencies = [
@@ -19,8 +20,10 @@ dependencies = [
     "psutil>=7.1",
     "platformdirs>=4.0",
     "keyring>=25.0",
-    # Interceptação HTTPS: autoridade certificadora local e certificados por site.
-    "cryptography>=46.0",
+    # Interceptação HTTPS: autoridade certificadora local e certificados por site. A partir da 49
+    # não há mais wheel para Mac Intel: lá o uv compilaria do fonte (exige Rust e OpenSSL).
+    "cryptography>=46.0; sys_platform != 'darwin' or platform_machine != 'x86_64'",
+    "cryptography>=46.0,<49; sys_platform == 'darwin' and platform_machine == 'x86_64'",
     # Modo transparente no Windows (WinDivert). No Linux é usado o nftables do sistema.
     "pydivert>=2.1; sys_platform == 'win32'",
 ]
@@ -30,7 +33,7 @@ veredo = "proxy_manager.main:main"
 
 [dependency-groups]
 dev = ["pytest>=8.0"]
-# Empacotamento standalone (scripts/build_windows.ps1 e scripts/build_linux.sh).
+# Empacotamento standalone (scripts/build_windows.ps1, build_linux.sh e build_macos.sh).
 build = ["pyinstaller>=6.16"]
 
 [tool.uv]

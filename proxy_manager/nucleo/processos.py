@@ -31,6 +31,9 @@ _cache_processos: OrderedDict[int, tuple[float, InfoProcesso]] = OrderedDict()
 # conexão.
 _trava_tabelas = threading.Lock()
 _tabelas: dict[str, tuple[float, list]] = {}  # tipo -> (início da leitura, conexões)
+# Sem root o macOS recusa a leitura da tabela; tentar de novo a cada conexão só a atrasaria.
+ESPERA_APOS_NEGADO = 60.0
+_negado_ate: dict[str, float] = {}
 
 
 def _conexoes(tipo: str, pedido_em: float) -> list:
@@ -38,8 +41,14 @@ def _conexoes(tipo: str, pedido_em: float) -> list:
         lida = _tabelas.get(tipo)
         if lida is not None and lida[0] > pedido_em:
             return lida[1]
+        if _negado_ate.get(tipo, 0.0) > pedido_em:
+            raise psutil.AccessDenied()
         inicio = time.perf_counter()
-        conexoes = psutil.net_connections(kind=tipo)
+        try:
+            conexoes = psutil.net_connections(kind=tipo)
+        except (psutil.AccessDenied, PermissionError):
+            _negado_ate[tipo] = time.perf_counter() + ESPERA_APOS_NEGADO
+            raise
         _tabelas[tipo] = (inicio, conexoes)
         return conexoes
 
@@ -124,3 +133,4 @@ def limpar_cache() -> None:
     _cache_processos.clear()
     with _trava_tabelas:
         _tabelas.clear()
+        _negado_ate.clear()

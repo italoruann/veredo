@@ -120,3 +120,19 @@ def test_rajada_de_conexoes_compartilha_a_leitura_da_tabela(monkeypatch):
     antes = len(leituras)
     processos.processo_da_conexao("192.168.0.5", 40000, 58080, destino_original=("1.1.1.1", 443))
     assert len(leituras) == antes + 1
+
+
+def test_tabela_negada_nao_e_lida_de_novo_a_cada_conexao(monkeypatch):
+    # Sem root o macOS recusa a leitura; cada conexão nova repetiria a tentativa.
+    tentativas = []
+
+    def negar(kind):
+        tentativas.append(kind)
+        raise processos.psutil.AccessDenied()
+
+    processos.limpar_cache()
+    monkeypatch.setattr(processos.psutil, "net_connections", negar)
+    for porta in range(40000, 40005):
+        assert processos.processo_da_conexao("127.0.0.1", porta, 58080) is processos.DESCONHECIDO
+    assert tentativas == ["tcp"]
+    processos.limpar_cache()
