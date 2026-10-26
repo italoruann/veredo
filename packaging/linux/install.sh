@@ -4,7 +4,7 @@
 #
 #   sudo packaging/linux/install.sh            atalho que pede a senha ao abrir (pkexec)
 #   sudo packaging/linux/install.sh --servico  motor como serviço do systemd, rodando como root
-#                                              desde o boot; o atalho abre só a janela, sem senha
+#                                              (só com a janela aberta); o atalho abre sem senha
 set -e
 
 if [ "$(id -u)" -ne 0 ]; then

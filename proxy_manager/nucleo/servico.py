@@ -8,6 +8,9 @@ janela vira um cliente dele por um canal de controle local.
   leva o token gravado em `controle.token`, legível pelos usuários da máquina: isso impede que
   páginas da web (que conseguem enviar texto para portas locais) comandem o serviço, mas
   qualquer usuário local pode configurá-lo, como no próprio Proxifier.
+- O motor só fica ligado enquanto o Veredo está aberto: o serviço não o liga sozinho no boot e,
+  sem nenhuma janela acompanhando por PRAZO_SEM_JANELA segundos (ela fechou, travou ou foi
+  morta), desliga-o. Parado, o serviço não toca na rede; só escuta o canal de controle.
 - No Windows o serviço é uma tarefa agendada que roda como SYSTEM na inicialização (um script
   Python não responde ao gerenciador de serviços); no Linux, uma unidade do systemd."""
 from __future__ import annotations
@@ -39,9 +42,9 @@ NOME_UNIDADE = "veredo.service"
 CAMINHO_UNIDADE = Path("/etc/systemd/system") / NOME_UNIDADE
 # Configurações e contadores enviados ao cliente que acompanha o serviço.
 INTERVALO_CONTADORES = 1.0
-# Novas tentativas de ligar o motor no boot, se a primeira falhar.
-TENTATIVAS_BOOT = 24
-INTERVALO_TENTATIVA_BOOT = 5.0
+# Sem nenhuma janela acompanhando por este tempo, o motor é desligado. A folga cobre a reconexão
+# automática da janela (a cada 2 s) depois de um tropeço no canal.
+PRAZO_SEM_JANELA = 10.0
 # Um estado igual ao anterior, recebido dentro deste intervalo, é a cópia vinda do outro canal.
 JANELA_REPETICAO = 2.0
 LIMITE_LINHA = 16 * 1024 * 1024
@@ -116,16 +119,18 @@ class ServidorControle:
     """Atende a janela: estado, configuração, ligar/desligar e o log ao vivo."""
 
     def __init__(self, motor, registro: Registro, token: str,
-                 salvar: Callable[[Configuracao], None] = salvar_config_servico):
+                 salvar: Callable[[Configuracao], None] = salvar_config_servico,
+                 prazo_sem_janela: float = PRAZO_SEM_JANELA):
         self.motor = motor
         self.registro = registro
         self.token = token
         self.salvar = salvar
+        self.prazo_sem_janela = prazo_sem_janela
         self.ativo = False
         self.mensagem = ""
-        self.comandado = False  # a janela já mandou ligar ou parar o motor
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._servidor: Optional[asyncio.AbstractServer] = None
+        self._vigia: Optional[asyncio.Task] = None
         self._ouvintes: set[asyncio.Queue] = set()
         motor.ao_mudar_estado = self._ao_mudar_estado
         motor.ao_mudar_ip_saida = self._ao_mudar_ip_saida
@@ -135,13 +140,35 @@ class ServidorControle:
     async def iniciar(self, porta: int = PORTA_CONTROLE) -> None:
         self._loop = asyncio.get_running_loop()
         self._servidor = await asyncio.start_server(self._atender, "127.0.0.1", porta, limit=LIMITE_LINHA)
+        self._vigia = asyncio.create_task(self._vigiar_janela())
 
     async def parar(self) -> None:
+        if self._vigia is not None:
+            self._vigia.cancel()
+            self._vigia = None
         if self._servidor is not None:
             self._servidor.close()
             self._servidor = None
         for fila in list(self._ouvintes):
             fila.put_nowait(None)
+
+    async def _vigiar_janela(self) -> None:
+        """Desliga o motor quando nenhuma janela o acompanha: fechar o Veredo (mesmo sem avisar,
+        se ele travar ou for morto) nunca deixa o tráfego passando por um motor sem dono."""
+        intervalo = min(1.0, self.prazo_sem_janela / 4)
+        sem_janela_desde: Optional[float] = None
+        while True:
+            await asyncio.sleep(intervalo)
+            if self._ouvintes or not self.motor.em_execucao():
+                sem_janela_desde = None
+                continue
+            agora = time.monotonic()
+            if sem_janela_desde is None:
+                sem_janela_desde = agora
+            elif agora - sem_janela_desde >= self.prazo_sem_janela:
+                sem_janela_desde = None
+                print(f"{NOME_APP}: nenhuma janela conectada; desligando o motor", flush=True)
+                await asyncio.to_thread(self.motor.parar)
 
     # Callbacks da thread do motor: só repassam ao loop do canal.
     def _difundir(self, mensagem: dict) -> None:
@@ -207,11 +234,9 @@ class ServidorControle:
         if comando == "estado":
             return {**self._estado(), **self._contadores()}
         if comando == "iniciar":
-            self.comandado = True
             await asyncio.to_thread(self.motor.iniciar)
             return self._estado()
         if comando == "parar":
-            self.comandado = True
             await asyncio.to_thread(self.motor.parar)
             return self._estado()
         if comando == "configurar":
@@ -252,7 +277,8 @@ class ServidorControle:
 
 
 def executar_servico(porta_controle: int = PORTA_CONTROLE) -> int:
-    """`python -m proxy_manager --servico`: roda até receber SIGTERM/Ctrl+C."""
+    """`python -m proxy_manager --servico`: roda até receber SIGTERM/Ctrl+C. O motor começa
+    parado e só liga quando a janela pede."""
     from .motor import MotorProxy
 
     cfg = carregar_config_servico()
@@ -273,8 +299,7 @@ def executar_servico(porta_controle: int = PORTA_CONTROLE) -> int:
                 loop.add_signal_handler(sig, parar.set)
             except (NotImplementedError, RuntimeError):
                 signal.signal(sig, lambda *_: loop.call_soon_threadsafe(parar.set))
-        # O estado do motor vai também para o journal: sem a janela aberta, era o único lugar
-        # onde uma falha no boot ficaria visível.
+        # O estado do motor vai também para o journal, para investigar sem a janela aberta.
         avisar_janela = motor.ao_mudar_estado
 
         def ao_mudar_estado(ativo: bool, mensagem: str) -> None:
@@ -283,18 +308,6 @@ def executar_servico(porta_controle: int = PORTA_CONTROLE) -> int:
 
         motor.ao_mudar_estado = ao_mudar_estado
         print(f"{NOME_APP}: serviço ativo; canal de controle em 127.0.0.1:{porta_controle}", flush=True)
-        await asyncio.to_thread(motor.iniciar)
-        # No boot a rede (e o resolv.conf) pode ainda não estar pronta: tenta de novo por um
-        # tempo, até a janela assumir o controle ligando ou parando o motor.
-        for _ in range(TENTATIVAS_BOOT):
-            if motor.em_execucao() or controle.comandado or parar.is_set():
-                break
-            try:
-                await asyncio.wait_for(parar.wait(), timeout=INTERVALO_TENTATIVA_BOOT)
-            except asyncio.TimeoutError:
-                pass
-            if not (motor.em_execucao() or controle.comandado or parar.is_set()):
-                await asyncio.to_thread(motor.iniciar)
         await parar.wait()
         await controle.parar()
         await asyncio.to_thread(motor.parar)
@@ -495,13 +508,16 @@ def pasta_projeto() -> str:
 
 def unidade_systemd() -> str:
     execucao = " ".join(_aspas_shell(parte) for parte in comando_servico())
+    limpeza = " ".join(_aspas_shell(parte) for parte in comando_servico()[:-1] + ["--limpar-rede"])
+    # Sem esperar a rede: o serviço começa com o motor parado, e quanto antes ele responder, menos
+    # a janela aberta no login precisa esperar por ele. O ExecStopPost roda também quando o
+    # processo cai: sem ele, as regras do nftables ficariam desviando o tráfego para um motor morto.
     return (
         "[Unit]\n"
-        f"Description={NOME_APP} (proxy por regras)\n"
-        "After=network-online.target\n"
-        "Wants=network-online.target\n\n"
+        f"Description={NOME_APP} (proxy por regras)\n\n"
         "[Service]\n"
         f"ExecStart={execucao}\n"
+        f"ExecStopPost=-{limpeza}\n"
         f"WorkingDirectory={pasta_projeto()}\n"
         "Restart=on-failure\n"
         "RestartSec=3\n\n"
@@ -564,11 +580,15 @@ def instalar_servico() -> tuple[bool, str]:
                 xml = Path(pasta) / "tarefa.xml"
                 xml.write_text(tarefa_windows(), encoding="utf-16")
                 _rodar(["schtasks", "/Create", "/F", "/TN", NOME_TAREFA, "/XML", str(xml)])
+            # Numa reinstalação a instância antiga continuaria rodando o executável anterior.
+            subprocess.run(["schtasks", "/End", "/TN", NOME_TAREFA], capture_output=True, timeout=30)
             _rodar(["schtasks", "/Run", "/TN", NOME_TAREFA])
         elif platform.system() == "Linux":
             CAMINHO_UNIDADE.write_text(unidade_systemd(), encoding="utf-8")
             _rodar(["systemctl", "daemon-reload"])
-            _rodar(["systemctl", "enable", "--now", NOME_UNIDADE])
+            _rodar(["systemctl", "enable", NOME_UNIDADE])
+            # restart, não start: numa reinstalação o processo antigo seguiria com o código anterior.
+            _rodar(["systemctl", "restart", NOME_UNIDADE])
         else:
             return False, "Modo serviço disponível só no Windows e no Linux."
     except (ErroServico, OSError, subprocess.TimeoutExpired) as exc:
@@ -595,6 +615,17 @@ def remover_servico() -> tuple[bool, str]:
         except OSError:
             pass
     return True, "Serviço removido."
+
+
+def limpar_rede() -> None:
+    """`--limpar-rede`: desfaz o que o motor muda no sistema, para quando ele morreu sem desligar
+    (o systemd roda isto sempre que o serviço termina, inclusive numa queda). No Windows o driver
+    do WinDivert solta a captura sozinho quando o processo morre; resta o cache DNS."""
+    if platform.system() == "Linux":
+        from .transparente import linux_nftables
+        linux_nftables.limpar_regras()
+    from . import dns
+    dns.limpar_cache_sistema()
 
 
 def servico_instalado() -> bool:

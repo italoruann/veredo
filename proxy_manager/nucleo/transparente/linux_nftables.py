@@ -94,6 +94,15 @@ def _apagar_rotas() -> None:
         subprocess.run(comando, capture_output=True, timeout=5)
 
 
+def limpar_regras() -> None:
+    """Apaga a tabela e as rotas do modo transparente que tenham sobrado de um processo que caiu."""
+    try:
+        _apagar_tabela()
+        _apagar_rotas()
+    except (OSError, subprocess.TimeoutExpired):
+        pass  # sem nft/ip instalados não há o que apagar
+
+
 def _ler_destino_original(ancilares) -> Optional[tuple[str, int]]:
     for nivel, tipo, dados in ancilares:
         if nivel == _SOL_IP and tipo == _IP_RECVORIGDSTADDR:
@@ -155,6 +164,13 @@ class ModoTransparenteLinux:
             # para TCP em vez de escapar do proxy.
             ["nft", "add", "chain", "inet", NOME_TABELA, "block_unsupported",
              "{", "type", "filter", "hook", "output", "priority", "0", ";", "}"],
+        ]
+        if self.porta_dns and not self.capturar_udp:
+            # Sem "UDP pelas regras" ninguém atende UDP a um IP falso: o pacote sairia para a rede
+            # e o programa (NTP, jogos, VPN) esperaria o timeout. Recusado, ele falha na hora.
+            comandos.append(regra + ["block_unsupported", "ip", "daddr", str(dns.REDE_FALSA),
+                                     "meta", "l4proto", "udp", "reject"])
+        comandos += [
             regra + ["block_unsupported", "meta", "skuid", uid, "return"],
             regra + ["block_unsupported", "oifname", "lo", "return"],
         ]

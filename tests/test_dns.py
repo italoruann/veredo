@@ -290,3 +290,12 @@ def test_limpar_cache_sistema_usa_o_comando_de_cada_sistema(monkeypatch):
     real()
 
     assert comandos == [["ipconfig", "/flushdns"], ["resolvectl", "flush-caches"]]
+
+
+def test_resolvedor_real_sem_servidores_rele_a_cada_consulta():
+    # O motor ligou antes da rede: assim que o sistema tiver um servidor, ele já é usado.
+    lista = []
+    real = dns.ResolvedorReal([], fornecedor_servidores=lambda: list(lista))
+    assert real._servidores_atuais() == []
+    lista.append("192.0.2.53")
+    assert real._servidores_atuais() == ["192.0.2.53"]

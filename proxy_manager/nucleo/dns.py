@@ -320,8 +320,9 @@ class ResolvedorReal:
 
     def _servidores_atuais(self) -> list[str]:
         agora = time.monotonic()
+        # Sem nenhum servidor (o motor ligou antes da rede) relê a cada consulta.
         if (self._fornecedor_servidores is not None
-                and agora - self._servidores_lidos_em >= INTERVALO_RELEITURA_SERVIDORES):
+                and (not self.servidores or agora - self._servidores_lidos_em >= INTERVALO_RELEITURA_SERVIDORES)):
             self._servidores_lidos_em = agora
             self.servidores = self._fornecedor_servidores() or self.servidores
         return self.servidores

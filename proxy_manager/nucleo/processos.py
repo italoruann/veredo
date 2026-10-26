@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import os
+import threading
+import time
 from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Optional
@@ -22,6 +24,25 @@ DESCONHECIDO = InfoProcesso()
 _MAX_CACHE = 512
 _cache_processos: OrderedDict[int, tuple[float, InfoProcesso]] = OrderedDict()
 
+# Ler a tabela de conexões do sistema custa dezenas de milissegundos com muitos sockets abertos, e
+# cada conexão nova esperava a sua leitura antes de seguir. Uma leitura que começou depois do
+# pedido já contém a conexão dele, então serve a todos os pedidos feitos até ali: numa rajada (o
+# navegador abre dezenas de conexões de uma vez) a tabela é lida duas ou três vezes, não uma por
+# conexão.
+_trava_tabelas = threading.Lock()
+_tabelas: dict[str, tuple[float, list]] = {}  # tipo -> (início da leitura, conexões)
+
+
+def _conexoes(tipo: str, pedido_em: float) -> list:
+    with _trava_tabelas:
+        lida = _tabelas.get(tipo)
+        if lida is not None and lida[0] > pedido_em:
+            return lida[1]
+        inicio = time.perf_counter()
+        conexoes = psutil.net_connections(kind=tipo)
+        _tabelas[tipo] = (inicio, conexoes)
+        return conexoes
+
 
 def processo_da_conexao(ip_origem: str, porta_origem: int, porta_escuta: int,
                         destino_original: Optional[tuple[str, int]] = None) -> InfoProcesso:
@@ -30,7 +51,7 @@ def processo_da_conexao(ip_origem: str, porta_origem: int, porta_escuta: int,
     No modo transparente o socket do aplicativo continua apontando para o destino original
     (o redirecionamento é invisível para ele), por isso `destino_original` também é aceito."""
     try:
-        conexoes = psutil.net_connections(kind="tcp")
+        conexoes = _conexoes("tcp", time.perf_counter())
     except (psutil.AccessDenied, PermissionError):
         return DESCONHECIDO
 
@@ -51,7 +72,7 @@ def processo_da_conexao(ip_origem: str, porta_origem: int, porta_escuta: int,
 def processo_udp(porta_origem: int) -> InfoProcesso:
     """Processo dono do socket UDP local `porta_origem` (UDP não tem conexão: só a porta)."""
     try:
-        conexoes = psutil.net_connections(kind="udp")
+        conexoes = _conexoes("udp", time.perf_counter())
     except (psutil.AccessDenied, PermissionError):
         return DESCONHECIDO
     pid_proprio = os.getpid()
@@ -101,3 +122,5 @@ def _executavel(proc: psutil.Process) -> str:
 
 def limpar_cache() -> None:
     _cache_processos.clear()
+    with _trava_tabelas:
+        _tabelas.clear()

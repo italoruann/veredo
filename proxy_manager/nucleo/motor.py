@@ -463,9 +463,9 @@ class MotorProxy:
 
     async def _ligar_dns(self, prefs: Preferencias) -> None:
         fixos = dns.interpretar_excecoes(prefs.dns_servidores)
+        # Sem servidores ainda (a rede não subiu, o Wi-Fi está conectando) o motor liga mesmo assim:
+        # a lista do sistema é relida a cada consulta e as respostas voltam quando ela chegar.
         servidores = fixos or dns.servidores_dns_sistema()
-        if not servidores:
-            raise RuntimeError("nenhum servidor DNS encontrado no sistema; informe um nas Configurações")
         real = dns.ResolvedorReal(servidores, fornecedor_servidores=None if fixos else dns.servidores_dns_sistema)
         excecoes = dns.interpretar_excecoes(prefs.dns_excecoes)
         if platform.system() == "Linux":

@@ -231,13 +231,17 @@ com essa permissão, ou use o serviço do sistema.
 
 ### Serviço do sistema
 
-Em **Configurações > Serviço do sistema**, **Instalar serviço** faz o motor rodar sem a janela,
-iniciado com o computador e antes de qualquer login. No Windows é uma tarefa agendada que roda
+Em **Configurações > Serviço do sistema**, **Instalar serviço** faz o motor rodar como
+administrador/root sem que a janela precise de senha. No Windows é uma tarefa agendada que roda
 como SYSTEM; no Linux, a unidade `veredo.service` do systemd. A janela passa a controlar o
-serviço: liga e desliga o motor, envia a configuração e mostra o log ao vivo. Sair do Veredo
-para o motor (e desfaz o proxy do sistema); o serviço continua ativo e volta a ligar o motor no
-próximo boot ou quando você o inicia pela janela. Com o ícone na bandeja ativado, fechar a janela
-só a esconde e o motor continua ligado.
+serviço: liga o motor ao abrir, envia a configuração e mostra o log ao vivo.
+
+O motor só fica ligado enquanto o Veredo está aberto. Sair do Veredo para o motor (e desfaz o
+proxy do sistema); o processo do serviço continua, parado, sem tocar na rede, e não liga o motor
+sozinho no boot. Se a janela fechar sem avisar (travou ou foi morta), o serviço percebe em
+alguns segundos e desliga o motor. No Linux, se o próprio serviço cair, o systemd roda
+`--limpar-rede`, que apaga as regras do nftables, para a internet não ficar presa a um motor
+morto. Com o ícone na bandeja ativado, fechar a janela só a esconde e o motor continua ligado.
 
 Também dá para usar pela linha de comando (como administrador/root):
 

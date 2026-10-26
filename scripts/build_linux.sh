@@ -8,8 +8,8 @@
 #   ./scripts/build_linux.sh --install --admin  gera e instala em /opt (pede sudo) com atalho que
 #                                               abre via pkexec -- pede a senha toda vez que abre
 #   ./scripts/build_linux.sh --root             gera e instala em /opt (pede sudo uma vez) com o
-#                                               motor como servico do systemd, rodando como root
-#                                               desde o boot; o atalho abre so a janela, sem senha
+#                                               motor como servico do systemd, rodando como root;
+#                                               o atalho abre so a janela, sem senha
 #   ./scripts/build_linux.sh --uninstall        fecha o app e remove todas as instalacoes
 #
 # Sempre fecha o Veredo se estiver aberto e apaga o build anterior. Com --install, remove
@@ -37,10 +37,10 @@ Opcoes:
                      senha toda vez; a janela roda como root, com o modo transparente.
 
   --root             Instala em /opt/veredo e registra o motor como servico do systemd
-                     (veredo.service), rodando como root desde o boot. O sudo e pedido uma vez,
-                     na instalacao; o atalho abre so a janela, sem senha, e ela controla o
-                     servico. Sair do Veredo para o motor; ele volta no proximo boot ou pela
-                     janela.
+                     (veredo.service), rodando como root. O sudo e pedido uma vez, na
+                     instalacao; o atalho abre so a janela, sem senha, e ela controla o
+                     servico. O motor so fica ligado com a janela aberta: sair do Veredo
+                     o desliga, e o servico fica parado ate a janela abrir de novo.
 
   --uninstall        Fecha o Veredo e remove todas as instalacoes, o servico e o inicio
                      automatico.

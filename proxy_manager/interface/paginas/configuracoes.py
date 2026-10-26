@@ -460,11 +460,11 @@ class PaginaConfiguracoes(QWidget):
     def _criar_cartao_servico(self) -> QFrame:
         quadro, layout = _cartao("Serviço do sistema")
         dica = QLabel(
-            f"Roda o motor como serviço, iniciado com o computador e antes de qualquer login, "
-            f"sem a janela aberta. A janela passa a controlar o serviço e envia a ele a "
+            f"Roda o motor como serviço do administrador, para o modo transparente funcionar sem "
+            f"pedir senha ao abrir. A janela passa a controlar o serviço e envia a ele a "
             f"configuração (inclusive as senhas, guardadas num arquivo que só o administrador "
-            f"lê). Fechar o {NOME_EXIBICAO} para o motor, que volta a ligar no próximo boot ou "
-            f"pela janela. Pede permissão de administrador."
+            f"lê). O motor só fica ligado com o {NOME_EXIBICAO} aberto: fechá-lo desliga o motor, "
+            f"e o serviço fica parado até a janela abrir de novo. Pede permissão de administrador."
         )
         dica.setWordWrap(True)
         dica.setObjectName("DicaCartao")

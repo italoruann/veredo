@@ -146,7 +146,7 @@ def test_dns_pelo_proxy_desvia_porta_53_antes_da_excecao_de_loopback():
 
 def test_prevencao_de_vazamento_rejeita_todo_udp():
     comandos = ModoTransparenteLinux(58095, porta_dns=58053, bloquear_todo_udp=True).comandos("1000")
-    rejeitar = [c for c in comandos if "reject" in c]
+    rejeitar = [c for c in comandos if "reject" in c and "198.18.0.0/15" not in c]
     assert rejeitar == [["nft", "add", "rule", "inet", mod.NOME_TABELA, "block_unsupported",
                          "meta", "l4proto", "udp", "reject"]]
 
@@ -199,3 +199,31 @@ def test_dns_pelo_proxy_limpa_cache_ao_ligar(root_falso, comandos_registrados, l
     ModoTransparenteLinux(58095, porta_dns=58053).iniciar()
     # ao parar quem limpa é o motor (em qualquer modo), não o backend
     assert len(limpezas_cache_dns) == 1
+
+
+def test_udp_a_ip_falso_e_recusado_sem_udp_pelas_regras():
+    # Ninguém atende esse UDP: recusado, o programa (inclusive do próprio uid, que pega o IP falso
+    # do cache do sistema) falha na hora em vez de esperar o timeout.
+    comandos = ModoTransparenteLinux(58095, porta_dns=58053).comandos("0")
+    filtro = [c for c in comandos if "block_unsupported" in c and c[2] == "rule"]
+    indice_falso = next(i for i, c in enumerate(filtro) if "198.18.0.0/15" in c)
+    indice_dono = next(i for i, c in enumerate(filtro) if "skuid" in c)
+    assert indice_falso < indice_dono
+    assert filtro[indice_falso][-3:] == ["l4proto", "udp", "reject"]
+    # com UDP pelas regras esse UDP vai ao motor; sem DNS pelo proxy não há IP falso
+    for backend in (ModoTransparenteLinux(58095, porta_dns=58053, capturar_udp=True),
+                    ModoTransparenteLinux(58095)):
+        assert not any("198.18.0.0/15" in c and "reject" in c for c in backend.comandos("0"))
+
+
+def test_limpar_regras_apaga_tabela_e_rotas(comandos_registrados):
+    mod.limpar_regras()
+    assert ["nft", "delete", "table", "inet", mod.NOME_TABELA] in comandos_registrados
+    assert ["ip", "-4", "rule", "del", "fwmark", mod.MARCA_UDP, "lookup", mod.TABELA_ROTAS] in comandos_registrados
+
+
+def test_limpar_regras_sem_nft_instalado_nao_falha(monkeypatch):
+    def faltando(*_args, **_kwargs):
+        raise FileNotFoundError("nft")
+    monkeypatch.setattr(mod.subprocess, "run", faltando)
+    mod.limpar_regras()

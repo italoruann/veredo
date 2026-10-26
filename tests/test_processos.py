@@ -83,3 +83,40 @@ def test_transparente_acha_processo_pelo_destino_original(monkeypatch):
     assert info.pid == 777
 
     assert processos.processo_da_conexao("192.168.0.5", 40000, 58095) is processos.DESCONHECIDO
+
+
+def test_rajada_de_conexoes_compartilha_a_leitura_da_tabela(monkeypatch):
+    # Cada leitura da tabela é lenta; numa rajada, quem pediu antes de uma leitura começar
+    # aproveita a próxima em vez de ler de novo.
+    import threading
+    import time
+
+    leituras = []
+    conexoes = [_conexao(40000 + i, "1.1.1.1", 443, pid=777) for i in range(20)]
+
+    def ler(kind):
+        leituras.append(kind)
+        time.sleep(0.2)
+        return conexoes
+
+    processos.limpar_cache()
+    monkeypatch.setattr(processos.psutil, "net_connections", ler)
+    monkeypatch.setattr(processos, "_resolver_processo", lambda pid: processos.InfoProcesso(pid=pid, nome="app"))
+    resultados = {}
+
+    def consultar(i):
+        resultados[i] = processos.processo_da_conexao("192.168.0.5", 40000 + i, 58080,
+                                                      destino_original=("1.1.1.1", 443))
+
+    threads = [threading.Thread(target=consultar, args=(i,)) for i in range(20)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(5)
+    assert all(info.pid == 777 for info in resultados.values()) and len(resultados) == 20
+    assert len(leituras) <= 3
+
+    # uma conexão nova, depois da última leitura, nunca usa a tabela antiga
+    antes = len(leituras)
+    processos.processo_da_conexao("192.168.0.5", 40000, 58080, destino_original=("1.1.1.1", 443))
+    assert len(leituras) == antes + 1

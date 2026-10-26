@@ -19,6 +19,8 @@ from .modelo_fluxos import ModeloFluxos
 
 # Os eventos de log são acumulados e entregues em lote; um sinal por conexão travava a interface.
 INTERVALO_DESCARGA_MS = 200
+# Quanto a janela espera por um serviço instalado que ainda não respondeu (segundos).
+ESPERA_SERVICO = 10.0
 
 
 class Contexto(QObject):
@@ -38,10 +40,16 @@ class Contexto(QObject):
         self.fluxos.inscrever(self._ao_interceptar)
         # id do perfil -> (IP anterior, IP atual), preservado entre execuções.
         self.ips_saida: dict[str, tuple[str, str]] = carregar_ips_saida()
-        # Com o serviço do sistema rodando, a janela só o controla; senão o motor roda aqui.
-        if servico.servico_disponivel():
+        # Com o serviço do sistema rodando, a janela só o controla; senão o motor roda aqui. Aberta
+        # no login, a janela pode chegar antes do serviço: sem esperá-lo, o motor local (sem root)
+        # disputaria as portas com ele e o modo transparente falharia.
+        if servico.servico_disponivel() or (servico.servico_instalado()
+                                            and servico.esperar_servico(timeout=ESPERA_SERVICO)):
             self._usar_motor(servico.MotorRemoto(self.registro, fluxos=self.fluxos))
             self.motor.atualizar_configuracao(self.configuracao)
+            # O serviço só mantém o motor ligado com a janela aberta; abri-la o liga, como antes
+            # fazia o boot. Depois do laço de eventos, para a janela já receber o estado.
+            QTimer.singleShot(0, self.motor.iniciar)
         else:
             self._usar_motor(MotorProxy(self.configuracao, self.registro, self.fluxos))
         self.aviso_voz = AvisoVoz(self)
@@ -95,8 +103,9 @@ class Contexto(QObject):
         self.estado_mudou.emit(False, "Motor parado")
 
     def encerrar(self) -> None:
-        """Ao fechar o app: para o motor, local ou do serviço. O serviço continua rodando, com o
-        motor parado, até a janela ligá-lo de novo (ou até o próximo boot)."""
+        """Ao fechar o app: para o motor, local ou do serviço. O processo do serviço continua, com
+        o motor parado e sem tocar na rede, até a janela abrir de novo. Se este pedido não chegar
+        (a janela travou ou foi morta), o vigia do serviço desliga o motor sozinho."""
         self.motor.parar()
         if self.usando_servico:
             self.motor.desconectar()

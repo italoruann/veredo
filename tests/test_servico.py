@@ -18,11 +18,12 @@ PORTA_CONTROLE = 58498
 class _Servico:
     """O serviço rodando numa thread, como faria `--servico`, com os arquivos numa pasta temporária."""
 
-    def __init__(self, configuracao: Configuracao):
+    def __init__(self, configuracao: Configuracao, prazo_sem_janela: float = servico.PRAZO_SEM_JANELA):
         self.registro = Registro(dias_retencao=1)
         self.motor = MotorProxy(configuracao, self.registro)
         self.salvas: list[Configuracao] = []
-        self.controle = servico.ServidorControle(self.motor, self.registro, "segredo", salvar=self.salvas.append)
+        self.controle = servico.ServidorControle(self.motor, self.registro, "segredo", salvar=self.salvas.append,
+                                                 prazo_sem_janela=prazo_sem_janela)
         self._pronto = threading.Event()
         self._thread = threading.Thread(target=lambda: asyncio.run(self._rodar()), daemon=True)
 
@@ -157,6 +158,11 @@ def test_unidade_do_systemd():
     assert "WantedBy=multi-user.target" in unidade
     linha = next(l for l in unidade.splitlines() if l.startswith("ExecStart="))
     assert linha.endswith("--servico")
+    # se o processo cair, o systemd desfaz as regras de rede; "-": uma falha na limpeza não conta
+    limpeza = next(l for l in unidade.splitlines() if l.startswith("ExecStopPost="))
+    assert limpeza.startswith("ExecStopPost=-") and limpeza.endswith("--limpar-rede")
+    # o motor começa parado: não há por que atrasar o serviço até a rede subir
+    assert "network-online" not in unidade
 
 
 def test_executavel_empacotado_usa_a_propria_pasta(monkeypatch, tmp_path):
@@ -185,3 +191,37 @@ def test_fluxos_interceptados_e_certificado_chegam_a_janela(pasta_servico):
             assert remoto.certificado_ca() == srv.motor.certificado_ca()
         finally:
             remoto.desconectar()
+
+
+def test_motor_desliga_quando_nenhuma_janela_acompanha(pasta_servico):
+    with _Servico(_configuracao(), prazo_sem_janela=0.6) as srv:
+        remoto = servico.MotorRemoto(Registro(dias_retencao=1), PORTA_CONTROLE)
+        try:
+            remoto.iniciar()
+            assert _esperar(lambda: remoto._conectado)
+            # com a janela acompanhando, o motor fica ligado bem além do prazo
+            time.sleep(1.5)
+            assert srv.motor.em_execucao()
+        finally:
+            remoto.desconectar()  # a janela some sem pedir para parar (travou, foi morta)
+        assert _esperar(lambda: not srv.motor.em_execucao(), timeout=5)
+        # o serviço continua atendendo, e uma janela nova religa o motor
+        assert servico.servico_disponivel(PORTA_CONTROLE)
+
+
+def test_servico_nao_liga_o_motor_sozinho(pasta_servico):
+    with _Servico(_configuracao(), prazo_sem_janela=0.4) as srv:
+        time.sleep(1.0)
+        assert not srv.motor.em_execucao()
+
+
+def test_reinstalar_reinicia_o_servico(monkeypatch, tmp_path):
+    # "enable --now" não reinicia um serviço já rodando: ele seguiria com o executável antigo.
+    comandos = []
+    monkeypatch.setattr(servico.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(servico, "CAMINHO_UNIDADE", tmp_path / "veredo.service")
+    monkeypatch.setattr(servico, "_rodar", comandos.append)
+    ok, _ = servico.instalar_servico()
+    assert ok
+    assert ["systemctl", "restart", servico.NOME_UNIDADE] in comandos
+    assert not any("--now" in c for c in comandos)

@@ -45,11 +45,14 @@ Uso: veredo [opção]   (ou: uv run python -m proxy_manager [opção])
 Sem opção, abre a janela do Veredo.
 
   --minimizado          abre direto na bandeja (se o ícone na bandeja estiver ativado)
-  --servico             roda só o motor, sem janela, até receber SIGTERM/Ctrl+C; é o que o
-                        serviço do sistema executa
+  --servico             roda o serviço do motor, sem janela, até receber SIGTERM/Ctrl+C; é o
+                        que o serviço do sistema executa. O motor só liga quando a janela pede
+                        e desliga quando ela fecha
   --instalar-servico    registra o motor como serviço (systemd no Linux, tarefa agendada como
                         SYSTEM no Windows) e o inicia; exige root/administrador
   --remover-servico     para e remove o serviço; exige root/administrador
+  --limpar-rede         remove as regras do modo transparente que tenham sobrado de uma queda
+                        e limpa o cache DNS; exige root/administrador
   -h, --help            mostra esta ajuda
 
 Portas locais padrão: SOCKS5 58080, HTTP 58081, PAC e teste de vazamento 58090
@@ -66,6 +69,9 @@ def _executar_comando_servico(argumentos: list[str]) -> bool:
 
     if "--servico" in argumentos:
         sys.exit(servico.executar_servico())
+    if "--limpar-rede" in argumentos:
+        servico.limpar_rede()
+        sys.exit(0)
     for opcao, acao in (("--instalar-servico", servico.instalar_servico),
                         ("--remover-servico", servico.remover_servico)):
         if opcao in argumentos:
