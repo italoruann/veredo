@@ -605,3 +605,18 @@ def test_escolha_do_modo_dns(window):
     assert pagina.combo_dns.currentData() == "proxy" and not pagina.combo_dns.isEnabled()
     pagina._ao_salvar_transparente()
     assert prefs.modo_dns == "proxy"
+
+
+def test_modo_transparente_desabilitado_sem_suporte(app, monkeypatch):
+    from proxy_manager.interface.paginas import configuracoes
+
+    monkeypatch.setattr(configuracoes, "transparente_suportado", lambda: False)
+    ctx = Contexto()
+    ctx.configuracao.preferencias.modo_transparente_ativo = True
+    pagina = configuracoes.PaginaConfiguracoes(ctx)
+    assert not pagina.caixa_transparente.isEnabled() and not pagina.caixa_transparente.isChecked()
+    # salvar limpa a opção que ficou marcada de antes
+    pagina._ao_salvar_transparente()
+    assert not ctx.configuracao.preferencias.modo_transparente_ativo
+    pagina.deleteLater()
+    ctx.encerrar()

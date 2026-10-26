@@ -46,6 +46,11 @@ class _AssociacaoSocks:
         self.proc = proc
 
 
+def transparente_suportado() -> bool:
+    """O modo transparente existe no Linux (nftables) e no Windows (WinDivert)."""
+    return platform.system() in ("Linux", "Windows")
+
+
 def _criar_backend_transparente(prefs: Preferencias) -> Optional[BackendTransparente]:
     argumentos = (prefs.porta_transparente, prefs.porta_dns if prefs.dns_ativo else None,
                   prefs.prevenir_vazamento, prefs.udp_pelas_regras)
@@ -237,7 +242,11 @@ class MotorProxy:
             self._emitir_estado(False, f"Não foi possível abrir as portas locais: {exc}")
             raise
 
-        if prefs.modo_transparente_ativo:
+        aviso = ""
+        if prefs.modo_transparente_ativo and not transparente_suportado():
+            # Num sistema sem o modo (macOS) a opção marcada não pode impedir o modo explícito.
+            aviso = f" (o modo transparente não existe no {platform.system()}; só o modo explícito funciona)"
+        elif prefs.modo_transparente_ativo:
             try:
                 await self._ligar_transparente(prefs)
             except (OSError, RuntimeError) as exc:
@@ -245,7 +254,7 @@ class MotorProxy:
                 raise
 
         self._chaves_perfis = {perfil.id: self._chave_cache_ip(perfil) for perfil in self.configuracao.proxies}
-        self._emitir_estado(True, "Motor iniciado")
+        self._emitir_estado(True, "Motor iniciado" + aviso)
 
     async def _fechar_portas_abertas(self) -> None:
         """Desfaz um _iniciar_servidores() que falhou no meio."""

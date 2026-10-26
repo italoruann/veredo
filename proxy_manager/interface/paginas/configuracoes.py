@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
 from ..contexto import Contexto
 from ...nucleo import inicio_automatico, integracao_sistema, servico
 from ...nucleo.configuracao import NOME_EXIBICAO, pasta_dados
+from ...nucleo.motor import transparente_suportado
 from ..componentes.responsivo import caixa_com_quebra
 
 
@@ -341,6 +342,11 @@ class PaginaConfiguracoes(QWidget):
         dica.setWordWrap(True)
         dica.setObjectName("DicaCartao")
         layout.addWidget(dica)
+        if not transparente_suportado():
+            self.caixa_transparente.setChecked(False)
+            self.caixa_transparente.setEnabled(False)
+            dica.setText("O modo transparente existe só no Windows e no Linux. Neste sistema, configure os "
+                         "programas ou o proxy do sistema para as portas locais do Veredo (modo explícito).")
 
         form_dns = QFormLayout()
         self.combo_dns = QComboBox()
@@ -455,7 +461,7 @@ class PaginaConfiguracoes(QWidget):
 
     def _carregar_transparente(self) -> None:
         preferencias = self.ctx.configuracao.preferencias
-        self.caixa_transparente.setChecked(preferencias.modo_transparente_ativo)
+        self.caixa_transparente.setChecked(preferencias.modo_transparente_ativo and transparente_suportado())
         self.campo_porta_transparente.setValue(preferencias.porta_transparente)
         self.caixa_vazamento.setChecked(preferencias.prevenir_vazamento)
         self._selecionar_modo_dns(preferencias.modo_dns)

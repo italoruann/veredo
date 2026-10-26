@@ -159,3 +159,20 @@ def test_transparente_host_http_permite_regra_por_dominio(monkeypatch):
             motor.parar()
 
     asyncio.run(cenario())
+
+
+def test_sem_suporte_ao_transparente_o_motor_liga_no_modo_explicito(monkeypatch):
+    # No macOS não há modo transparente: a opção marcada não pode impedir o motor de ligar.
+    monkeypatch.setattr(engine_module.platform, "system", lambda: "Darwin")
+    backend = _BackendTransparenteFalso(destino_fixo=("127.0.0.1", 1))
+    monkeypatch.setattr(engine_module, "_criar_backend_transparente", lambda prefs: backend)
+    motor, _registro = _criar_motor_transparente("* +direct\n", backend)
+    estados = []
+    motor.ao_mudar_estado = lambda ativo, mensagem: estados.append((ativo, mensagem))
+    motor.iniciar()
+    try:
+        assert motor.em_execucao() and not backend.inicio
+        assert motor._servidor_socks is not None and motor._servidor_transparente is None
+        assert estados[-1][0] and "modo explícito" in estados[-1][1]
+    finally:
+        motor.parar()
