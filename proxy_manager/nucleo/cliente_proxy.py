@@ -46,12 +46,20 @@ def _contexto_tls() -> ssl.SSLContext:
     return ssl.create_default_context()
 
 
+def _contexto_tls_do_perfil(perfil: PerfilProxy) -> ssl.SSLContext:
+    contexto = _contexto_tls()
+    if not perfil.verificar_certificado:
+        contexto.check_hostname = False
+        contexto.verify_mode = ssl.CERT_NONE
+    return contexto
+
+
 async def abrir_conexao_proxy(perfil: PerfilProxy, timeout: float = 15.0
                               ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
     """Conexão até o próprio proxy, com TLS se ele for HTTPS."""
     if perfil.type == "https":
         return await rede.abrir_conexao(perfil.host, perfil.port, timeout=timeout,
-                                        ssl=_contexto_tls(), server_hostname=perfil.host)
+                                        ssl=_contexto_tls_do_perfil(perfil), server_hostname=perfil.host)
     return await rede.abrir_conexao(perfil.host, perfil.port, timeout=timeout)
 
 
@@ -97,7 +105,7 @@ async def abrir_tunel(perfis: list[PerfilProxy], host: str, porta: int, timeout:
         for atual, seguinte in zip(perfis, perfis[1:]):
             await _negociar(atual, leitor, escritor, seguinte.host, seguinte.port, timeout)
             if seguinte.type == "https":
-                await escritor.start_tls(_contexto_tls(), server_hostname=seguinte.host)
+                await escritor.start_tls(_contexto_tls_do_perfil(seguinte), server_hostname=seguinte.host)
         await _negociar(perfis[-1], leitor, escritor, host, porta, timeout)
     except BaseException:
         escritor.close()

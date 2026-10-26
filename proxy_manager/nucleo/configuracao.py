@@ -74,6 +74,9 @@ class PerfilProxy:
     senha: str = ""
     ativo: bool = True
     padrao: bool = False
+    # Só para o tipo "https". Desligado aceita qualquer certificado do proxy, como os de
+    # revendedores que apresentam o certificado do fornecedor (outro nome de host).
+    verificar_certificado: bool = True
 
     def para_dict(self) -> dict[str, Any]:
         return asdict(self)

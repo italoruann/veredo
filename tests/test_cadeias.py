@@ -295,3 +295,45 @@ def test_proxy_https_no_primeiro_salto_e_dentro_de_cadeia(tmp_path, monkeypatch)
                 s.close()
 
     asyncio.run(cenario())
+
+
+def test_proxy_https_sem_verificar_certificado_aceita_certificado_nao_confiavel(tmp_path):
+    import ssl
+
+    import pytest
+
+    gerado = _gerar_certificado(tmp_path)
+    if gerado is None:
+        pytest.skip("openssl não encontrado")
+    contexto_servidor = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+    contexto_servidor.load_cert_chain(*gerado)
+
+    async def cenario():
+        async def handle(leitor, escritor):
+            try:
+                cabecalho = await ler_cabecalho_requisicao(leitor)
+                leitor_d, escritor_d = await asyncio.open_connection(*extrair_destino(cabecalho))
+            except Exception:
+                escritor.close()
+                return
+            escritor.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+            await escritor.drain()
+            await asyncio.gather(_repassar(leitor, escritor_d), _repassar(leitor_d, escritor))
+
+        servidor_tls = await asyncio.start_server(handle, "127.0.0.1", 0, ssl=contexto_servidor)
+        porta_tls = servidor_tls.sockets[0].getsockname()[1]
+        eco, porta_eco = await _eco()
+        try:
+            # O nome do host também não bate com o do certificado (CN=localhost).
+            https = PerfilProxy(nome="tls", type="https", host="127.0.0.1", port=porta_tls)
+            with pytest.raises(ssl.SSLCertVerificationError):
+                await cliente_proxy.abrir_tunel([https], "127.0.0.1", porta_eco)
+
+            https.verificar_certificado = False
+            leitor, escritor = await cliente_proxy.abrir_tunel([https], "127.0.0.1", porta_eco)
+            assert await _conversar(leitor, escritor) == b"ping"
+        finally:
+            for s in (servidor_tls, eco):
+                s.close()
+
+    asyncio.run(cenario())

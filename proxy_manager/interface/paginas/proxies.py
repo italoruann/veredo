@@ -80,6 +80,11 @@ class PaginaProxies(QWidget):
         self.caixa_ativo = QCheckBox("Habilitado")
         self.caixa_ativo.setChecked(True)
         self.caixa_padrao = QCheckBox("Usar como proxy padrão (quando a regra não especificar um nome)")
+        self.caixa_verificar = QCheckBox("Verificar o certificado do proxy (desmarque se o proxy apresentar "
+                                         "o certificado de outro domínio, comum em revendedores)")
+        self.caixa_verificar.setChecked(True)
+        self.linha_verificar = caixa_com_quebra(self.caixa_verificar)
+        self.combo_tipo.currentIndexChanged.connect(self._atualizar_opcoes_tipo)
 
         form.addRow("Nome", self.campo_nome)
         form.addRow("Tipo", self.combo_tipo)
@@ -87,6 +92,7 @@ class PaginaProxies(QWidget):
         form.addRow("Porta", self.campo_porta)
         form.addRow("Usuário", self.campo_usuario)
         form.addRow("Senha", self.campo_senha)
+        form.addRow("", self.linha_verificar)
         form.addRow("", self.caixa_ativo)
         form.addRow("", caixa_com_quebra(self.caixa_padrao))
         layout_form.addLayout(form)
@@ -136,6 +142,7 @@ class PaginaProxies(QWidget):
             if selecionar_id and perfil.id == selecionar_id:
                 item_alvo = item
         self.lista.blockSignals(False)
+        self._atualizar_opcoes_tipo()
 
         if item_alvo is not None:
             self.lista.setCurrentItem(item_alvo)
@@ -148,7 +155,8 @@ class PaginaProxies(QWidget):
 
     def _habilitar_form(self, ativo: bool) -> None:
         for widget in (self.campo_nome, self.combo_tipo, self.campo_host, self.campo_porta,
-                       self.campo_usuario, self.campo_senha, self.caixa_ativo, self.caixa_padrao,
+                       self.campo_usuario, self.campo_senha, self.caixa_verificar, self.caixa_ativo,
+                       self.caixa_padrao,
                        self.botao_salvar, self.botao_testar, self.botao_remover):
             widget.setEnabled(ativo)
 
@@ -160,7 +168,11 @@ class PaginaProxies(QWidget):
         self.campo_senha.setText("")
         self.caixa_ativo.setChecked(True)
         self.caixa_padrao.setChecked(False)
+        self.caixa_verificar.setChecked(True)
         self.rotulo_resultado.setText("")
+
+    def _atualizar_opcoes_tipo(self) -> None:
+        self.linha_verificar.setVisible(self.combo_tipo.currentData() == "https")
 
     def _carregar_perfil(self, perfil: PerfilProxy) -> None:
         self.campo_nome.setText(perfil.nome)
@@ -172,6 +184,7 @@ class PaginaProxies(QWidget):
         self.campo_senha.setText(perfil.senha)
         self.caixa_ativo.setChecked(perfil.ativo)
         self.caixa_padrao.setChecked(perfil.padrao)
+        self.caixa_verificar.setChecked(perfil.verificar_certificado)
         self.rotulo_resultado.setText("")
 
     # -- eventos -----------------------------------------------------------
@@ -210,6 +223,7 @@ class PaginaProxies(QWidget):
         perfil.senha = self.campo_senha.text()
         perfil.ativo = self.caixa_ativo.isChecked()
         perfil.padrao = self.caixa_padrao.isChecked()
+        perfil.verificar_certificado = self.caixa_verificar.isChecked()
 
         if perfil.padrao:
             for outro in self.ctx.configuracao.proxies:
@@ -241,6 +255,7 @@ class PaginaProxies(QWidget):
             nome=self.campo_nome.text(), type=self.combo_tipo.currentData(),
             host=self.campo_host.text().strip(), port=self.campo_porta.value(),
             usuario=self.campo_usuario.text(), senha=self.campo_senha.text(),
+            verificar_certificado=self.caixa_verificar.isChecked(),
         )
         self.rotulo_resultado.setText("Testando conexão…")
         self.botao_testar.setEnabled(False)
