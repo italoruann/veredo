@@ -584,3 +584,24 @@ def test_inspetor_mostra_fluxos_filtra_e_liga_a_interceptacao(window):
     assert not ctx.configuracao.preferencias.interceptacao_ativa
     inspetor.limpar()
     assert inspetor.modelo.rowCount() == 0
+
+
+def test_escolha_do_modo_dns(window):
+    window.abrir_dialogo_perfil(2)
+    pagina = window.pagina_configuracoes
+    prefs = pagina.ctx.configuracao.preferencias
+    pagina.caixa_transparente.setChecked(True)
+    pagina.combo_dns.setCurrentIndex(pagina.combo_dns.findData("personalizado"))
+    assert pagina.rotulo_dns_servidores.text() == "Servidores DNS"
+    # sem servidor não salva
+    pagina.campo_dns_servidores.setText("")
+    pagina._ao_salvar_transparente()
+    assert prefs.modo_dns != "personalizado"
+    pagina.campo_dns_servidores.setText("1.1.1.1; 8.8.8.8")
+    pagina._ao_salvar_transparente()
+    assert (prefs.modo_dns, prefs.dns_servidores) == ("personalizado", "1.1.1.1; 8.8.8.8")
+    # a prevenção de vazamento prende o seletor no DNS do proxy
+    pagina.caixa_vazamento.setChecked(True)
+    assert pagina.combo_dns.currentData() == "proxy" and not pagina.combo_dns.isEnabled()
+    pagina._ao_salvar_transparente()
+    assert prefs.modo_dns == "proxy"

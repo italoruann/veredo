@@ -121,7 +121,7 @@ def test_motor_traduz_ip_falso_para_o_nome(monkeypatch):
         monkeypatch.setattr(modulo_motor, "_criar_backend_transparente", lambda prefs: backend)
         prefs = Preferencias(porta_socks=58680, porta_http=58681, porta_pac=58690,
                              modo_transparente_ativo=True, porta_transparente=58695,
-                             dns_pelo_proxy=True, porta_dns=58653,
+                             modo_dns="proxy", porta_dns=58653,
                              dns_servidores=f"127.0.0.1:{porta_upstream}", acao_padrao="block")
         cfg = Configuracao(texto_regras="meusite.teste +direct\n", preferencias=prefs)
         registro = Registro(dias_retencao=1)
@@ -157,7 +157,7 @@ def test_ip_falso_desconhecido_e_recusado(monkeypatch):
         monkeypatch.setattr(modulo_motor, "_criar_backend_transparente", lambda prefs: backend)
         prefs = Preferencias(porta_socks=58680, porta_http=58681, porta_pac=58690,
                              modo_transparente_ativo=True, porta_transparente=58695,
-                             dns_pelo_proxy=True, porta_dns=58653, dns_servidores="127.0.0.1:9",
+                             modo_dns="proxy", porta_dns=58653, dns_servidores="127.0.0.1:9",
                              acao_padrao="direct")
         motor = MotorProxy(Configuracao(texto_regras="", preferencias=prefs), Registro(dias_retencao=1))
         motor.iniciar()

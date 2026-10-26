@@ -1,4 +1,5 @@
-"""DNS pelo proxy: servidor DNS local com IPs falsos e um resolvedor próprio para o motor.
+"""DNS do modo transparente: servidor DNS local com IPs falsos (DNS pelo proxy) ou que encaminha
+aos servidores escolhidos (DNS personalizado), e um resolvedor próprio para o motor.
 
 No modo transparente as consultas DNS dos programas são desviadas para cá. Cada nome recebe um IP
 falso da faixa 198.18.0.0/15 (reservada para testes, nunca usada na internet); quando o programa
@@ -6,7 +7,11 @@ conecta nesse IP, o motor sabe qual era o nome, aplica as regras por domínio e 
 proxy, que resolve do lado dele. Assim nenhuma consulta DNS sai da máquina pela rede local.
 
 O próprio motor não pode usar o resolvedor do sistema enquanto isso estiver ativo (receberia os
-IPs falsos de volta), então consulta os servidores DNS reais diretamente com `ResolvedorReal`."""
+IPs falsos de volta), então consulta os servidores DNS reais diretamente com `ResolvedorReal`.
+
+No DNS personalizado não há IPs falsos: `EncaminhadorDns` leva cada consulta aos servidores
+escolhidos pelo caminho que as regras mandarem para o IP do servidor, por UDP direto ou por TCP
+através do proxy (proxies SOCKS e HTTP só transportam TCP)."""
 from __future__ import annotations
 
 import asyncio
@@ -22,7 +27,7 @@ from urllib.parse import urlsplit
 from dataclasses import dataclass
 from pathlib import Path
 from shutil import which
-from typing import Callable, Optional
+from typing import Awaitable, Callable, Optional, Union
 
 from . import rede
 from .regras import dividir_alvo, padrao_corresponde
@@ -303,6 +308,134 @@ def _servidores_windows() -> list[str]:
     return sorted(servidores, key=lambda s: ":" in s)
 
 
+def endereco_servidor(texto: str) -> tuple[str, int]:
+    """"1.1.1.1", "1.1.1.1:5353" ou "[2606:4700::1111]:53" -> (host, porta)."""
+    servidor, porta = dividir_alvo(texto)
+    return servidor, int(porta) if porta.isdigit() else 53
+
+
+async def consultar_udp(servidor: str, porta: int, consulta: bytes, timeout: float) -> Optional[bytes]:
+    """Consulta crua por UDP, de uma porta anunciada como do motor (o modo transparente a deixa sair)."""
+    loop = asyncio.get_running_loop()
+    familia = socket.AF_INET6 if ":" in servidor else socket.AF_INET
+    sock = socket.socket(familia, socket.SOCK_DGRAM)
+    porta_local = 0
+    try:
+        sock.setblocking(False)
+        sock.bind(("::" if familia == socket.AF_INET6 else "0.0.0.0", 0))
+        porta_local = sock.getsockname()[1]
+        rede.reservar_porta(porta_local)
+        await loop.sock_sendto(sock, consulta, rede.endereco_socket(servidor, porta))
+        fim = loop.time() + timeout
+        while True:
+            dados, _origem = await asyncio.wait_for(loop.sock_recvfrom(sock, 4096),
+                                                    timeout=max(fim - loop.time(), 0.01))
+            if dados[:2] == consulta[:2]:
+                return dados
+    except (OSError, asyncio.TimeoutError):
+        return None
+    finally:
+        if porta_local:
+            rede.liberar_porta(porta_local)
+        sock.close()
+
+
+AbrirTunel = Callable[[], Awaitable[tuple[asyncio.StreamReader, asyncio.StreamWriter]]]
+
+
+async def consultar_tcp(abrir: AbrirTunel, consulta: bytes, timeout: float) -> Optional[bytes]:
+    """Consulta crua por TCP (cada mensagem precedida do tamanho, RFC 1035 4.2.2) num túnel aberto
+    por `abrir`, normalmente através do proxy."""
+    escritor: Optional[asyncio.StreamWriter] = None
+
+    async def trocar() -> bytes:
+        nonlocal escritor
+        leitor, escritor = await abrir()
+        escritor.write(struct.pack("!H", len(consulta)) + consulta)
+        await escritor.drain()
+        tamanho = struct.unpack("!H", await leitor.readexactly(2))[0]
+        return await leitor.readexactly(tamanho)
+
+    try:
+        dados = await asyncio.wait_for(trocar(), timeout=timeout)
+    except Exception:  # proxy recusou, túnel caiu, tempo esgotado: tenta o próximo servidor
+        return None
+    finally:
+        if escritor is not None:
+            escritor.close()
+    return dados if dados[:2] == consulta[:2] else None
+
+
+# Caminho até um servidor DNS: "direct", "block" ou o que abre o túnel TCP até ele pelo proxy.
+Caminho = Union[str, AbrirTunel]
+
+
+class EncaminhadorDns:
+    """DNS personalizado: leva cada consulta aos `servidores`, na ordem, pelo caminho que
+    `caminho(host, porta)` devolver. As respostas ficam um tempo em cache e consultas iguais ao
+    mesmo tempo viram uma só: pelo proxy cada consulta abre um túnel, o que custa algumas idas e
+    voltas. `ao_resolver(nome, enderecos)` recebe os endereços de cada resposta."""
+
+    def __init__(self, servidores: list[str], caminho: Callable[[str, int], Caminho],
+                 timeout: float = 4.0, validade_cache: float = 30.0, max_cache: int = 4096,
+                 ao_resolver: Optional[Callable[[str, list[str]], None]] = None):
+        self.servidores = servidores
+        self.caminho = caminho
+        self.timeout = timeout
+        self.validade_cache = validade_cache
+        self.max_cache = max_cache
+        self.ao_resolver = ao_resolver
+        # Pergunta (a consulta sem o id) -> (instante, resposta).
+        self._cache: OrderedDict[bytes, tuple[float, bytes]] = OrderedDict()
+        self._pendentes: dict[bytes, asyncio.Future] = {}
+
+    async def consultar(self, consulta: bytes) -> Optional[bytes]:
+        chave = consulta[2:]
+        em_cache = self._cache.get(chave)
+        if em_cache is not None and time.monotonic() - em_cache[0] < self.validade_cache:
+            return consulta[:2] + em_cache[1][2:]
+        pendente = self._pendentes.get(chave)
+        if pendente is not None:
+            resposta = await asyncio.shield(pendente)
+            return consulta[:2] + resposta[2:] if resposta else None
+        futuro: asyncio.Future = asyncio.get_running_loop().create_future()
+        self._pendentes[chave] = futuro
+        resposta: Optional[bytes] = None
+        try:
+            resposta = await self._consultar_servidores(consulta)
+        finally:
+            del self._pendentes[chave]
+            futuro.set_result(resposta)
+        if resposta is not None and len(resposta) > 3 and resposta[3] & 0x0F != RCODE_FALHA:
+            self._guardar(chave, consulta, resposta)
+        return resposta
+
+    def _guardar(self, chave: bytes, consulta: bytes, resposta: bytes) -> None:
+        self._cache[chave] = (time.monotonic(), resposta)
+        self._cache.move_to_end(chave)
+        if len(self._cache) > self.max_cache:
+            self._cache.popitem(last=False)
+        if self.ao_resolver is not None:
+            lida = ler_consulta(consulta)
+            enderecos = ler_enderecos(resposta)
+            if lida is not None and enderecos:
+                self.ao_resolver(lida.nome, enderecos)
+
+    async def _consultar_servidores(self, consulta: bytes) -> Optional[bytes]:
+        for texto in self.servidores:
+            servidor, porta = endereco_servidor(texto)
+            caminho = self.caminho(servidor, porta)
+            if caminho == "block":
+                continue
+            if caminho == "direct":
+                resposta = await consultar_udp(servidor, porta, consulta, self.timeout)
+            else:
+                resposta = await consultar_tcp(caminho, consulta, self.timeout)
+            if resposta is not None:
+                return resposta
+        return None
+
+
 class ResolvedorReal:
     """Consulta servidores DNS diretamente, sem passar pelo cache do sistema."""
 
@@ -333,31 +466,11 @@ class ResolvedorReal:
 
     async def consultar(self, consulta: bytes) -> Optional[bytes]:
         """Envia a consulta crua ao primeiro servidor que responder."""
-        loop = asyncio.get_running_loop()
         for texto in self._servidores_atuais():
-            servidor, porta = dividir_alvo(texto)
-            porta = int(porta) if porta.isdigit() else 53
-            familia = socket.AF_INET6 if ":" in servidor else socket.AF_INET
-            sock = socket.socket(familia, socket.SOCK_DGRAM)
-            porta_local = 0
-            try:
-                sock.setblocking(False)
-                sock.bind(("::" if familia == socket.AF_INET6 else "0.0.0.0", 0))
-                porta_local = sock.getsockname()[1]
-                rede.reservar_porta(porta_local)
-                await loop.sock_sendto(sock, consulta, rede.endereco_socket(servidor, porta))
-                fim = loop.time() + self.timeout
-                while True:
-                    dados, _origem = await asyncio.wait_for(loop.sock_recvfrom(sock, 4096),
-                                                            timeout=max(fim - loop.time(), 0.01))
-                    if dados[:2] == consulta[:2]:
-                        return dados
-            except (OSError, asyncio.TimeoutError):
-                continue
-            finally:
-                if porta_local:
-                    rede.liberar_porta(porta_local)
-                sock.close()
+            servidor, porta = endereco_servidor(texto)
+            resposta = await consultar_udp(servidor, porta, consulta, self.timeout)
+            if resposta is not None:
+                return resposta
         return None
 
     async def resolver(self, nome: str) -> list[str]:
@@ -403,14 +516,17 @@ class ServidorDns:
     """Responde consultas com IPs falsos. Nomes nas exceções vão ao DNS real.
 
     `bloquear_outros`: consultas que não são de endereço (MX, TXT, SRV...) recebem resposta vazia
-    em vez de irem ao DNS real, para que nada vaze."""
+    em vez de irem ao DNS real, para que nada vaze.
+    `encaminhar`: DNS personalizado; toda consulta fora das exceções vai para ele, sem IP falso."""
 
     def __init__(self, tabela: TabelaIpsFalsos, real: ResolvedorReal, excecoes: list[str],
-                 bloquear_outros: bool = False):
+                 bloquear_outros: bool = False,
+                 encaminhar: Optional[Callable[[bytes], Awaitable[Optional[bytes]]]] = None):
         self.tabela = tabela
         self.real = real
         self.excecoes = excecoes
         self.bloquear_outros = bloquear_outros
+        self.encaminhar = encaminhar
         self.consultas = 0
         self._transportes: list[asyncio.DatagramTransport] = []
         self._tarefas: set[asyncio.Task] = set()
@@ -425,6 +541,8 @@ class ServidorDns:
         self.consultas += 1
         if consulta.classe != CLASSE_IN or self.eh_excecao(consulta.nome):
             return await self.real.consultar(dados) or montar_resposta(consulta, RCODE_FALHA)
+        if self.encaminhar is not None:
+            return await self.encaminhar(dados) or montar_resposta(consulta, RCODE_FALHA)
         if consulta.tipo == TIPO_A:
             ip = self.tabela.ip_para(consulta.nome)
             return montar_resposta(consulta, respostas=[(TIPO_A, ipaddress.IPv4Address(ip).packed)])

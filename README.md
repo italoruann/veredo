@@ -216,10 +216,20 @@ sistema, então até programas que ignoram a configuração de proxy passam pela
 
 TCP sobre IPv4 e IPv6 é interceptado. Opções do mesmo cartão:
 
-- **DNS pelo proxy:** um servidor DNS local responde aos programas com endereços falsos
-  (`198.18.x.x`). Quando o programa conecta num deles, o Veredo sabe o nome do site, aplica as
-  regras por domínio e manda o nome para o proxy resolver. Os nomes da lista de exceções vão ao
-  DNS normal.
+- **DNS:** escolha entre três modos.
+  - **DNS do sistema:** as consultas não são desviadas.
+  - **DNS do proxy:** um servidor DNS local responde aos programas com endereços falsos
+    (`198.18.x.x`). Quando o programa conecta num deles, o Veredo sabe o nome do site, aplica as
+    regras por domínio e manda o nome para o proxy resolver.
+  - **DNS personalizado:** as consultas vão aos servidores que você informar (`1.1.1.1; 8.8.8.8`),
+    pelo caminho que as regras mandam para o IP de cada um: com regra pelo proxy, por TCP através
+    do proxy (o provedor não vê); com regra direto, por UDP. A consulta chega sem programa dono,
+    então vale como um programa desconhecido; para garantir o caminho, use uma regra com o IP,
+    como `1.1.1.1:53 +proxy:Nome`. Proxies HTTP costumam recusar a porta 53. O Veredo lembra o
+    nome de cada IP resolvido, então as regras por domínio continuam valendo.
+
+  Nos dois últimos, os nomes de "Resolver pela rede local" (`*.lan`, `*.local`...) vão ao DNS da
+  sua rede.
 - **Prevenção de vazamento:** liga o DNS pelo proxy, responde vazio às consultas DNS que não são
   de endereço e bloqueia o UDP que sairia direto (o WebRTC revelaria o seu IP).
 - **UDP pelas regras:** cada fluxo UDP (jogos, chamadas, QUIC) segue as regras: direto,

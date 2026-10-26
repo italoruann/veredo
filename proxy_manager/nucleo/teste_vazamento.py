@@ -17,7 +17,7 @@ class DadosTeste:
     ip_real_v6: str = ""
     ips_proxy: list[str] = field(default_factory=list)
     modo_transparente: bool = False
-    dns_pelo_proxy: bool = False
+    modo_dns: str = "sistema"  # "sistema", "proxy" ou "personalizado", como o motor está usando
     prevenir_vazamento: bool = False
     proxy_sistema: bool = False
 
@@ -217,13 +217,17 @@ async function testarWebrtc() {
 }
 
 function testarDns() {
-  if (D.modo_transparente && (D.dns_pelo_proxy || D.prevenir_vazamento)) {
+  if (D.modo_transparente && D.modo_dns === "proxy") {
     return marcar("dns", "ok", "As consultas DNS são respondidas pelo Veredo e os nomes são resolvidos " +
                   "pelo proxy.");
   }
+  if (D.modo_transparente && D.modo_dns === "personalizado") {
+    return marcar("dns", "ok", "As consultas DNS vão aos servidores do DNS personalizado, pelo caminho " +
+                  "que as regras mandam para eles (pelo proxy ou direto).");
+  }
   if (D.modo_transparente) {
     return marcar("dns", "aviso", "As consultas DNS vão direto ao seu provedor, que vê os sites acessados. " +
-                  "Ative o DNS pelo proxy nas Configurações.");
+                  "Escolha o DNS pelo proxy ou um DNS personalizado nas Configurações.");
   }
   return marcar("dns", "aviso", "No modo explícito o navegador manda o nome do site ao proxy, mas ainda " +
                 "pode fazer consultas DNS próprias (pré-carregamento, DNS seguro). Para garantir, use o Modo " +

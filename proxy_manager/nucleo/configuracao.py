@@ -127,6 +127,9 @@ class Aplicativo:
         return Aplicativo(**_filtrar_campos(Aplicativo, dados))
 
 
+MODOS_DNS = ("sistema", "proxy", "personalizado")
+
+
 @dataclass
 class Preferencias:
     porta_socks: int = 58080
@@ -140,10 +143,16 @@ class Preferencias:
     modo_transparente_ativo: bool = False
     porta_transparente: int = 58095
     aviso_voz_ip_ativo: bool = True
-    # DNS pelo proxy (só no modo transparente): nomes viram IPs falsos e o proxy resolve.
-    dns_pelo_proxy: bool = False
+    # DNS no modo transparente (as consultas dos programas são desviadas para o Veredo):
+    #   "sistema": não desvia; vale o DNS do sistema.
+    #   "proxy": nomes viram IPs falsos e o proxy resolve do lado dele.
+    #   "personalizado": as consultas vão aos `dns_servidores`, pelo caminho que as regras mandarem
+    #   para o IP de cada servidor (pelo proxy, por TCP, ou direto, por UDP).
+    modo_dns: str = "sistema"
     dns_excecoes: str = "localhost; *.local; *.lan; *.home.arpa; *.localdomain"
-    dns_servidores: str = ""  # vazio = os servidores DNS do sistema
+    # No DNS pelo proxy: os servidores reais do próprio Veredo e das exceções (vazio = os do
+    # sistema). No personalizado: os servidores escolhidos (obrigatório).
+    dns_servidores: str = ""
     porta_dns: int = 58053
     # Prevenção de vazamento: DNS pelo proxy, consultas DNS que não são de endereço respondidas
     # vazias e todo UDP de saída bloqueado (WebRTC, QUIC).
@@ -159,15 +168,26 @@ class Preferencias:
     interceptacao_verificar_destino: bool = True  # recusar certificados inválidos dos servidores
 
     @property
+    def modo_dns_efetivo(self) -> str:
+        """A prevenção de vazamento sempre usa o DNS pelo proxy."""
+        if self.prevenir_vazamento:
+            return "proxy"
+        return self.modo_dns if self.modo_dns in MODOS_DNS else "sistema"
+
+    @property
     def dns_ativo(self) -> bool:
-        return self.modo_transparente_ativo and (self.dns_pelo_proxy or self.prevenir_vazamento)
+        """As consultas DNS dos programas são desviadas para o servidor DNS local."""
+        return self.modo_transparente_ativo and self.modo_dns_efetivo != "sistema"
 
     def para_dict(self) -> dict[str, Any]:
         return asdict(self)
 
     @staticmethod
     def de_dict(dados: dict[str, Any]) -> Preferencias:
-        return Preferencias(**_filtrar_campos(Preferencias, dados))
+        campos = _filtrar_campos(Preferencias, dados)
+        if "modo_dns" not in dados and dados.get("dns_pelo_proxy"):
+            campos["modo_dns"] = "proxy"  # configuração de antes da escolha do modo
+        return Preferencias(**campos)
 
 
 @dataclass

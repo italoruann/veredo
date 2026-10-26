@@ -8,6 +8,7 @@ import ipaddress
 import platform
 import threading
 import time
+from collections import OrderedDict
 from typing import Callable, Optional, Protocol
 
 from . import cliente_proxy, dns, processos, proxy_http, rede, socks5, teste_vazamento, udp, verificacao_ip
@@ -27,6 +28,8 @@ CallbackIpSaida = Callable[[str, str, str], None]
 
 # O ip-api.com limita requisições por minuto; o IP de saída é reconsultado no máximo a cada 10 min.
 VALIDADE_CACHE_IP_SAIDA = 600.0
+# DNS personalizado: quantos IPs resolvidos guardam o nome consultado, para as regras por domínio.
+MAX_NOMES_RESOLVIDOS = 16384
 
 
 class BackendTransparente(Protocol):
@@ -101,6 +104,8 @@ class MotorProxy:
         self.servidor_dns: Optional[dns.ServidorDns] = None
         # Mantida entre reinícios do motor: programas guardam os IPs falsos em cache.
         self.tabela_dns = dns.TabelaIpsFalsos()
+        # DNS personalizado: IP real -> último nome que o resolveu (sem IP falso não há outra pista).
+        self.nomes_resolvidos: OrderedDict[str, str] = OrderedDict()
         self._escritores_ativos: set[asyncio.StreamWriter] = set()
         self._tarefas_fundo: set[asyncio.Task] = set()
         self.udp: Optional[udp.GerenciadorUdp] = None
@@ -274,7 +279,8 @@ class MotorProxy:
             ip_real=ip_real or "", ip_real_v6=ip_real_v6 or "",
             # Um proxy que sai pelo IP da própria máquina não conta como IP de proxy.
             ips_proxy=sorted(ips_proxy - {"", "?", ip_real, ip_real_v6}),
-            modo_transparente=prefs.modo_transparente_ativo, dns_pelo_proxy=prefs.dns_ativo,
+            modo_transparente=prefs.modo_transparente_ativo,
+            modo_dns=prefs.modo_dns_efetivo if prefs.dns_ativo else "sistema",
             prevenir_vazamento=prefs.prevenir_vazamento, proxy_sistema=prefs.integracao_sistema_ativa,
         ))
 
@@ -378,7 +384,7 @@ class MotorProxy:
                 erros.append(f"porta do PAC ({novas.porta_pac}): {exc}")
                 novas.porta_pac = antigas.porta_pac
 
-        campos_transparente = ("modo_transparente_ativo", "porta_transparente", "dns_pelo_proxy",
+        campos_transparente = ("modo_transparente_ativo", "porta_transparente", "modo_dns",
                                "dns_excecoes", "dns_servidores", "porta_dns", "prevenir_vazamento",
                                "udp_pelas_regras")
         transparente_mudou = (
@@ -463,17 +469,54 @@ class MotorProxy:
 
     async def _ligar_dns(self, prefs: Preferencias) -> None:
         fixos = dns.interpretar_excecoes(prefs.dns_servidores)
-        # Sem servidores ainda (a rede não subiu, o Wi-Fi está conectando) o motor liga mesmo assim:
-        # a lista do sistema é relida a cada consulta e as respostas voltam quando ela chegar.
-        servidores = fixos or dns.servidores_dns_sistema()
-        real = dns.ResolvedorReal(servidores, fornecedor_servidores=None if fixos else dns.servidores_dns_sistema)
         excecoes = dns.interpretar_excecoes(prefs.dns_excecoes)
         if platform.system() == "Linux":
             excecoes += dns.hosts_teste_conectividade()
-        servidor = dns.ServidorDns(self.tabela_dns, real, excecoes, bloquear_outros=prefs.prevenir_vazamento)
+        if prefs.modo_dns_efetivo == "personalizado":
+            if not fixos:
+                raise RuntimeError("informe os servidores do DNS personalizado nas Configurações")
+            # As exceções (nomes da rede local) só o DNS da própria rede conhece.
+            do_sistema = dns.ResolvedorReal(dns.servidores_dns_sistema(),
+                                            fornecedor_servidores=dns.servidores_dns_sistema)
+            encaminhador = dns.EncaminhadorDns(fixos, self._caminho_dns, ao_resolver=self._anotar_nomes)
+            servidor = dns.ServidorDns(self.tabela_dns, do_sistema, excecoes, encaminhar=encaminhador.consultar)
+            # O próprio motor (conexões diretas, endereço dos proxies) consulta os mesmos servidores,
+            # mas direto: pelo proxy, achar o endereço do próprio proxy daria uma volta sem fim.
+            real = dns.ResolvedorReal(fixos)
+        else:
+            # Sem servidores ainda (a rede não subiu, o Wi-Fi está conectando) o motor liga mesmo
+            # assim: a lista do sistema é relida a cada consulta e as respostas voltam quando ela chegar.
+            servidores = fixos or dns.servidores_dns_sistema()
+            real = dns.ResolvedorReal(servidores, fornecedor_servidores=None if fixos else dns.servidores_dns_sistema)
+            servidor = dns.ServidorDns(self.tabela_dns, real, excecoes, bloquear_outros=prefs.prevenir_vazamento)
         await servidor.iniciar(prefs.porta_dns)
         self.servidor_dns = servidor
         rede.resolvedor = real.resolver
+
+    def _caminho_dns(self, host: str, porta: int) -> dns.Caminho:
+        """Por onde vai uma consulta ao servidor do DNS personalizado: as regras para o IP e a porta
+        dele, como uma conexão de um programa desconhecido (a consulta chega sem dono)."""
+        prefs = self.configuracao.preferencias
+        resultado = self.conjunto_regras.avaliar(processos.DESCONHECIDO.nome, "", host, _ip_literal(host),
+                                                 acao_padrao=prefs.acao_padrao, porta=porta)
+        resultado = self._evitar_loop(resultado, host, porta)
+        if resultado.tipo_acao != "proxy":
+            return resultado.tipo_acao
+        rota = self._resolver_rota(resultado)
+        if rota is None:
+            return "block"  # a regra pede proxy, mas não há nenhum: sair direto seria um vazamento
+
+        async def abrir():
+            leitor, escritor, _usado = await cliente_proxy.conectar_rota(rota, host, porta)
+            return leitor, escritor
+        return abrir
+
+    def _anotar_nomes(self, nome: str, enderecos: list[str]) -> None:
+        for endereco in enderecos:
+            self.nomes_resolvidos[endereco] = nome
+            self.nomes_resolvidos.move_to_end(endereco)
+        while len(self.nomes_resolvidos) > MAX_NOMES_RESOLVIDOS:
+            self.nomes_resolvidos.popitem(last=False)
 
     def _desligar_dns(self) -> None:
         if self.servidor_dns is not None:
@@ -763,7 +806,8 @@ class MotorProxy:
 
         resultado, rota, entrada = await self._preparar(
             host, porta, origem[0], origem[1], self.configuracao.preferencias.porta_transparente,
-            "transparente", host_regras=host_detectado or nome_falso, destino_original=destino)
+            "transparente", host_regras=host_detectado or nome_falso or self.nomes_resolvidos.get(host),
+            destino_original=destino)
 
         if resultado.tipo_acao == "block":
             escritor.close()
