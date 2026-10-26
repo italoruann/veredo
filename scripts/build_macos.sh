@@ -30,10 +30,10 @@ Opcoes:
 
   -h, --help     Mostra esta ajuda.
 
-No macOS o Veredo funciona no modo explicito: aponte os programas para o proxy SOCKS5
-127.0.0.1:58080 ou HTTP 127.0.0.1:58081 (ou o PAC http://127.0.0.1:58090/proxy.pac). O modo
-transparente, o servico do sistema e a configuracao automatica do proxy do sistema existem so
-no Windows e no Linux. Exige macOS 13 ou mais novo.
+No macOS o Veredo funciona no modo explicito: ative em Configuracoes a opcao de configurar o
+proxy do sistema (o PAC vai para o Wi-Fi/Ethernet pelo networksetup), ou aponte os programas
+para o SOCKS5 127.0.0.1:58080 ou o HTTP 127.0.0.1:58081. O modo transparente e o servico do
+sistema existem so no Windows e no Linux. Exige macOS 13 ou mais novo.
 AJUDA
 }
 

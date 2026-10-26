@@ -1,9 +1,11 @@
-"""Proxy do sistema: gera e serve o arquivo PAC e o aplica/remove no Windows e no Linux."""
+"""Proxy do sistema: gera e serve o arquivo PAC e o aplica/remove no Windows, no Linux e no macOS."""
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import platform
+import shlex
 import subprocess
 from pathlib import Path
 from typing import Awaitable, Callable, Optional
@@ -88,6 +90,8 @@ def aplicar_proxy_sistema(url: str, porta_http: int) -> tuple[bool, str]:
         return _aplicar_windows(url)
     if sistema == "Linux":
         return _aplicar_linux(url, porta_http)
+    if sistema == "Darwin":
+        return _aplicar_macos(url)
     return False, f"Sistema operacional não suportado para integração automática: {sistema}"
 
 
@@ -99,7 +103,138 @@ def remover_proxy_sistema(manter_atalhos: bool = False) -> tuple[bool, str]:
         return _remover_windows()
     if sistema == "Linux":
         return _remover_linux(manter_atalhos)
+    if sistema == "Darwin":
+        return _remover_macos()
     return False, f"Sistema operacional não suportado para integração automática: {sistema}"
+
+
+# -- macOS ------------------------------------------------------------------------------------
+# O proxy fica em cada serviço de rede (Wi-Fi, Ethernet...); Safari, Chrome, Edge e o Firefox no
+# padrão "usar as configurações do sistema" seguem o do serviço ativo. O PAC é posto em todos os
+# serviços habilitados, para continuar valendo ao trocar de rede. O PAC que o usuário tinha antes
+# fica guardado e volta quando o motor para.
+
+ARQUIVO_PAC_ANTERIOR_MACOS = "proxy_macos_anterior.json"
+
+
+def _eh_pac_do_veredo(url: str) -> bool:
+    return url.startswith("http://127.0.0.1:") and url.endswith("/proxy.pac")
+
+
+def _rodar_texto(cmd: list[str], timeout: float = 15) -> subprocess.CompletedProcess:
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+
+
+def _servicos_rede_macos() -> list[str]:
+    """Serviços de rede habilitados; os desabilitados aparecem com "*" na frente."""
+    saida = _rodar_texto(["networksetup", "-listallnetworkservices"]).stdout
+    return [linha.strip() for linha in saida.splitlines()
+            if linha.strip() and "asterisk" not in linha and not linha.startswith("*")]
+
+
+def _pac_do_servico_macos(servico: str) -> tuple[str, bool]:
+    """(URL do PAC, ligado) do serviço; "(null)" vira ""."""
+    url, ligado = "", False
+    for linha in _rodar_texto(["networksetup", "-getautoproxyurl", servico]).stdout.splitlines():
+        chave, _, valor = linha.partition(":")
+        valor = valor.strip()
+        if chave.strip() == "URL":
+            url = "" if valor == "(null)" else valor
+        elif chave.strip() == "Enabled":
+            ligado = valor.lower() == "yes"
+    return url, ligado
+
+
+def _falhou_networksetup(resultado: subprocess.CompletedProcess) -> bool:
+    # O networksetup sai com 0 mesmo quando recusa, só avisando "** Error: ..." na saída.
+    return resultado.returncode != 0 or "error" in (resultado.stdout + resultado.stderr).lower()
+
+
+def _aspas_applescript(texto: str) -> str:
+    return '"' + texto.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _executar_networksetup(comandos: list[list[str]]) -> tuple[bool, str]:
+    """Roda os comandos como o usuário; os que o macOS recusar sem administrador vão juntos num
+    pedido de senha só (osascript ... with administrator privileges)."""
+    recusados = []
+    for comando in comandos:
+        try:
+            if _falhou_networksetup(_rodar_texto(comando)):
+                recusados.append(comando)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return False, f"networksetup falhou: {exc}"
+    if not recusados:
+        return True, ""
+    script = " && ".join(shlex.join(comando) for comando in recusados)
+    try:
+        resultado = _rodar_texto(["osascript", "-e", f"do shell script {_aspas_applescript(script)} "
+                                  "with administrator privileges"], timeout=180)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return False, f"networksetup falhou: {exc}"
+    if resultado.returncode != 0:
+        return False, (resultado.stderr or resultado.stdout).strip() or "permissão de administrador negada"
+    return True, ""
+
+
+def _arquivo_pac_anterior_macos() -> Path:
+    return pasta_dados() / ARQUIVO_PAC_ANTERIOR_MACOS
+
+
+def _aplicar_macos(url: str) -> tuple[bool, str]:
+    try:
+        servicos = _servicos_rede_macos()
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return False, f"Não foi possível listar os serviços de rede (networksetup): {exc}"
+    if not servicos:
+        return False, "Nenhum serviço de rede habilitado encontrado (networksetup)."
+    arquivo = _arquivo_pac_anterior_macos()
+    if not arquivo.exists():
+        # Só na primeira aplicação: depois disso o PAC atual já é o do Veredo.
+        anteriores = {}
+        for servico in servicos:
+            anterior, ligado = _pac_do_servico_macos(servico)
+            if anterior and not _eh_pac_do_veredo(anterior):
+                anteriores[servico] = {"url": anterior, "ligado": ligado}
+        arquivo.write_text(json.dumps(anteriores, ensure_ascii=False), encoding="utf-8")
+    comandos = []
+    for servico in servicos:
+        comandos.append(["networksetup", "-setautoproxyurl", servico, url])
+        comandos.append(["networksetup", "-setautoproxystate", servico, "on"])
+    ok, erro = _executar_networksetup(comandos)
+    if not ok:
+        return False, f"Falha ao configurar o proxy do macOS: {erro}"
+    return True, f"Proxy automático (PAC) configurado no macOS em: {', '.join(servicos)}."
+
+
+def _remover_macos() -> tuple[bool, str]:
+    arquivo = _arquivo_pac_anterior_macos()
+    try:
+        anteriores = json.loads(arquivo.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        anteriores = {}
+    try:
+        servicos = _servicos_rede_macos()
+        comandos = []
+        for servico in servicos:
+            atual, _ligado = _pac_do_servico_macos(servico)
+            if not _eh_pac_do_veredo(atual):
+                continue  # o usuário trocou o proxy desse serviço: não mexe
+            anterior = anteriores.get(servico)
+            if anterior:
+                comandos.append(["networksetup", "-setautoproxyurl", servico, anterior["url"]])
+                if not anterior["ligado"]:
+                    comandos.append(["networksetup", "-setautoproxystate", servico, "off"])
+            else:
+                comandos.append(["networksetup", "-setautoproxystate", servico, "off"])
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return False, f"Não foi possível ler o proxy do macOS (networksetup): {exc}"
+    if comandos:
+        ok, erro = _executar_networksetup(comandos)
+        if not ok:
+            return False, f"Falha ao remover o proxy do macOS: {erro}"
+    arquivo.unlink(missing_ok=True)
+    return True, "Configuração de proxy do macOS removida." if comandos else "Nenhuma alteração de sistema para reverter."
 
 
 def _aplicar_windows(url: str) -> tuple[bool, str]:

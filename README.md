@@ -198,6 +198,9 @@ quando ele para:
 
 - **Windows:** configura o PAC nas opções de internet do sistema, que Chrome, Edge e Firefox
   seguem.
+- **macOS:** configura o PAC em cada serviço de rede habilitado (Wi-Fi, Ethernet...), com o
+  `networksetup`; Safari, Chrome, Edge e o Firefox no padrão seguem essa configuração. O PAC que
+  você tinha antes volta quando o motor para. Se o macOS exigir administrador, a senha é pedida.
 - **Linux:** configura diretamente os navegadores. No Firefox (e derivados, inclusive Flatpak e
   Snap) o PAC é gravado no `user.js` de cada perfil, guardando os valores anteriores. Nos
   navegadores baseados em Chromium, é criada uma cópia do atalho do menu em
@@ -314,11 +317,12 @@ novo):
 O app sai com assinatura ad hoc, que basta para abrir no próprio Mac. Em outro Mac, o Gatekeeper
 pode pedir para liberar em **Ajustes do Sistema > Privacidade e Segurança > Abrir Mesmo Assim**.
 
-No macOS o Veredo funciona no modo explícito: configure os programas (ou o proxy do sistema, em
-**Ajustes do Sistema > Rede > Detalhes > Proxies**) para o SOCKS5 `127.0.0.1:58080`, o HTTP
-`127.0.0.1:58081` ou o PAC `http://127.0.0.1:58090/proxy.pac`. O modo transparente, o serviço do
-sistema, a configuração automática do proxy do sistema, o início automático e a instalação
-automática do certificado existem só no Windows e no Linux. Sem root, o macOS não informa qual
+No macOS o Veredo funciona no modo explícito. Ative em **Configurações** a opção de configurar o
+proxy do sistema (veja [Modo explícito](#modo-explícito-padrão)), ou aponte cada programa para o
+SOCKS5 `127.0.0.1:58080` ou o HTTP `127.0.0.1:58081`. Programas que ignoram o proxy do sistema
+(muitos de terminal, jogos, alguns apps) não passam pelo Veredo. O modo transparente, o serviço do
+sistema, o início automático e a instalação automática do certificado existem só no Windows e no
+Linux. Sem root, o macOS não informa qual
 programa abriu cada conexão, então as regras por aplicativo (`apps:`) não casam; as regras por
 site funcionam.
 
