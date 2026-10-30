@@ -234,6 +234,7 @@ def _aplicar_windows(url: str) -> tuple[bool, str]:
         caminho_chave = r"Software\Microsoft\Windows\CurrentVersion\Internet Settings"
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, caminho_chave, 0, winreg.KEY_SET_VALUE) as chave:
             winreg.SetValueEx(chave, "AutoConfigURL", 0, winreg.REG_SZ, url)
+        _definir_pac_conexao_windows(url)
         _avisar_windows()
         return True, "Proxy automático (PAC) configurado no Windows."
     except OSError as exc:
@@ -249,10 +250,69 @@ def _remover_windows() -> tuple[bool, str]:
                 winreg.DeleteValue(chave, "AutoConfigURL")
             except FileNotFoundError:
                 pass
+        _definir_pac_conexao_windows(None)
         _avisar_windows()
         return True, "Configuração de proxy do Windows removida."
     except OSError as exc:
         return False, f"Falha ao remover configuração do Windows: {exc}"
+
+
+def _definir_pac_conexao_windows(url: str | None) -> None:
+    """Liga (ou desliga, com None) o PAC nas opções da conexão LAN pelo WinINet.
+
+    O Chrome, o Edge e o Opera leem o proxy pelo WinHTTP, que usa o blob DefaultConnectionSettings
+    (na subchave Connections) e não o valor AutoConfigURL. Só gravar o valor
+    funcionava para navegadores abertos depois; um já aberto relia o blob ao ser avisado, não
+    achava o PAC e continuava direto até ser fechado. Os outros bits (detecção automática,
+    proxy manual) ficam como o usuário deixou."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class _Valor(ctypes.Union):
+            _fields_ = [("dwValue", wintypes.DWORD), ("pszValue", wintypes.LPWSTR),
+                        ("ftValue", wintypes.FILETIME)]
+
+        class _Opcao(ctypes.Structure):
+            _fields_ = [("dwOption", wintypes.DWORD), ("Value", _Valor)]
+
+        class _ListaOpcoes(ctypes.Structure):
+            _fields_ = [("dwSize", wintypes.DWORD), ("pszConnection", wintypes.LPWSTR),
+                        ("dwOptionCount", wintypes.DWORD), ("dwOptionError", wintypes.DWORD),
+                        ("pOptions", ctypes.POINTER(_Opcao))]
+
+        INTERNET_OPTION_PER_CONNECTION_OPTION = 75
+        INTERNET_PER_CONN_FLAGS = 1
+        INTERNET_PER_CONN_AUTOCONFIG_URL = 4
+        PROXY_TYPE_DIRECT = 1
+        PROXY_TYPE_AUTO_PROXY_URL = 4
+        wininet = ctypes.windll.Wininet  # type: ignore[attr-defined]
+
+        def _lista(opcoes: "ctypes.Array[_Opcao]") -> _ListaOpcoes:
+            return _ListaOpcoes(ctypes.sizeof(_ListaOpcoes), None, len(opcoes), 0,
+                                ctypes.cast(opcoes, ctypes.POINTER(_Opcao)))
+
+        consulta = (_Opcao * 1)()
+        consulta[0].dwOption = INTERNET_PER_CONN_FLAGS
+        lista = _lista(consulta)
+        tamanho = wintypes.DWORD(ctypes.sizeof(lista))
+        if wininet.InternetQueryOptionW(None, INTERNET_OPTION_PER_CONNECTION_OPTION,
+                                        ctypes.byref(lista), ctypes.byref(tamanho)):
+            bits = consulta[0].Value.dwValue
+        else:
+            bits = PROXY_TYPE_DIRECT
+        bits = (bits | PROXY_TYPE_AUTO_PROXY_URL) if url else (bits & ~PROXY_TYPE_AUTO_PROXY_URL)
+
+        opcoes = (_Opcao * 2)()
+        opcoes[0].dwOption = INTERNET_PER_CONN_FLAGS
+        opcoes[0].Value.dwValue = bits | PROXY_TYPE_DIRECT
+        opcoes[1].dwOption = INTERNET_PER_CONN_AUTOCONFIG_URL
+        opcoes[1].Value.pszValue = url or ""
+        lista = _lista(opcoes)
+        wininet.InternetSetOptionW(None, INTERNET_OPTION_PER_CONNECTION_OPTION,
+                                   ctypes.byref(lista), ctypes.sizeof(lista))
+    except Exception:
+        pass
 
 
 def _avisar_windows() -> None:
@@ -278,9 +338,7 @@ def _aplicar_linux(url: str, porta_http: int) -> tuple[bool, str]:
     from . import navegadores
 
     mensagens: list[str] = []
-    configurados = navegadores.aplicar(url)
-    mensagens.extend(configurados.mensagens)
-    algum_ok = configurados.configurou_algum
+    algum_ok = gsettings_ok = kde_ok = False
 
     if _tem_binario("gsettings"):
         try:
@@ -288,7 +346,7 @@ def _aplicar_linux(url: str, porta_http: int) -> tuple[bool, str]:
             _executar_como_usuario(["gsettings", "set", "org.gnome.system.proxy", "autoconfig-url", url])
             if _gsettings_gravado(url):
                 mensagens.append("GNOME/gsettings configurado.")
-                algum_ok = True
+                algum_ok = gsettings_ok = True
             else:
                 mensagens.append(_GSETTINGS_NAO_GRAVADO)
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as exc:
@@ -298,14 +356,29 @@ def _aplicar_linux(url: str, porta_http: int) -> tuple[bool, str]:
         try:
             _definir_proxy_kde({"ProxyType": "2", "Proxy Config Script": url})
             mensagens.append("KDE/kioslaverc configurado.")
-            algum_ok = True
+            algum_ok = kde_ok = True
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError, RuntimeError) as exc:
             mensagens.append(f"KDE/kioslaverc falhou: {_erro_comando(exc)}")
+
+    ambiente = os.environ.get("XDG_CURRENT_DESKTOP", "")
+    # O Chromium lê o kioslaverc no KDE e o gsettings nos demais ambientes da lista.
+    no_kde = "kde" in {d.strip().lower() for d in ambiente.split(":")}
+    chromium_pelo_sistema = _chromium_le_proxy_sistema(ambiente) and (kde_ok if no_kde else gsettings_ok)
+    # O Firefox lê o gsettings em qualquer ambiente.
+    configurados = navegadores.aplicar(url, firefox_pelo_sistema=gsettings_ok,
+                                       chromium_pelo_sistema=chromium_pelo_sistema)
+    mensagens = configurados.mensagens + mensagens
+    algum_ok = algum_ok or configurados.configurou_algum
+    if chromium_pelo_sistema:
+        mensagens.append("Chrome, Chromium, Edge, Brave, Vivaldi e Opera seguem o proxy do sistema e "
+                         "trocam sozinhos com o navegador aberto.")
+    elif configurados.chromium:
+        mensagens.append("Neste ambiente o navegador só lê o PAC ao abrir: se ele já estava aberto antes de o "
+                         "motor ligar, feche e abra de novo, ou use o modo transparente.")
 
     caminho_env = _gravar_script_env(porta_http, url)
     mensagens.append(f"Script de variáveis de ambiente gerado em {caminho_env} (use 'source' para apps de terminal).")
 
-    ambiente = os.environ.get("XDG_CURRENT_DESKTOP", "")
     if not configurados.chromium and ambiente and not _chromium_le_proxy_sistema(ambiente):
         mensagens.append(
             f"Atenção: no ambiente {ambiente}, Chrome/Chromium/Edge/Brave ignoram o proxy do sistema e "

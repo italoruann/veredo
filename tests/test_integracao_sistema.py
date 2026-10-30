@@ -158,3 +158,34 @@ def test_kde_detectado_pelo_kioslaverc_sem_variaveis(monkeypatch, tmp_path):
 def test_editar_kioslaverc_acrescenta_grupo_ausente():
     texto = mod._editar_kioslaverc("[General]\na=1\n", {"ProxyType": "2"})
     assert texto == "[General]\na=1\n\n[Proxy Settings]\nProxyType=2\n"
+
+
+def test_gnome_navegadores_seguem_o_proxy_do_sistema(monkeypatch):
+    _gsettings_falso(monkeypatch, gravado=True)
+    monkeypatch.setenv("XDG_CURRENT_DESKTOP", "ubuntu:GNOME")
+    chamadas = []
+    original = navegadores.aplicar
+    monkeypatch.setattr(navegadores, "aplicar", lambda url, **kw: chamadas.append(kw) or original(url, **kw))
+    ok, mensagem = mod._aplicar_linux(PAC, 58091)
+    assert chamadas == [{"firefox_pelo_sistema": True, "chromium_pelo_sistema": True}]
+    assert "trocam sozinhos" in mensagem
+
+
+def test_xfce_chromium_continua_pelo_pac_fixo(monkeypatch):
+    _gsettings_falso(monkeypatch, gravado=True)
+    monkeypatch.setenv("XDG_CURRENT_DESKTOP", "XFCE")
+    chamadas = []
+    original = navegadores.aplicar
+    monkeypatch.setattr(navegadores, "aplicar", lambda url, **kw: chamadas.append(kw) or original(url, **kw))
+    mod._aplicar_linux(PAC, 58091)
+    assert chamadas == [{"firefox_pelo_sistema": True, "chromium_pelo_sistema": False}]
+
+
+def test_gsettings_em_memoria_mantem_pac_fixo(monkeypatch):
+    _gsettings_falso(monkeypatch, gravado=False)
+    monkeypatch.setenv("XDG_CURRENT_DESKTOP", "GNOME")
+    chamadas = []
+    original = navegadores.aplicar
+    monkeypatch.setattr(navegadores, "aplicar", lambda url, **kw: chamadas.append(kw) or original(url, **kw))
+    mod._aplicar_linux(PAC, 58091)
+    assert chamadas == [{"firefox_pelo_sistema": False, "chromium_pelo_sistema": False}]

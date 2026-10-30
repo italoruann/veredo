@@ -5,6 +5,12 @@
 - Navegadores baseados em Chromium: uma cópia do atalho .desktop em ~/.local/share/applications
   com --proxy-pac-url. A cópia continua quando o motor para (sem o PAC o navegador conecta
   direto) e só é apagada ao desativar a integração, com o navegador fechado.
+
+Quando o proxy do sistema (gsettings/kioslaverc) foi gravado e o navegador o lê, ele é usado no
+lugar do PAC fixo: o Firefox (modo "usar o proxy do sistema") e o Chromium (no GNOME/KDE) observam
+essa configuração e trocam de proxy com o navegador aberto. O PAC fixo (user.js, --proxy-pac-url)
+só é lido ao abrir o navegador, e o Chromium que o abriu com o motor parado só tenta baixá-lo de
+novo horas depois.
 """
 from __future__ import annotations
 
@@ -55,7 +61,7 @@ def perfis_firefox() -> list[Path]:
     return perfis
 
 
-def aplicar_firefox(perfil: Path, url: str) -> None:
+def aplicar_firefox(perfil: Path, url: str, pelo_sistema: bool = False) -> None:
     user_js = perfil / "user.js"
     bloco, resto = _separar_bloco(si._ler_arquivo_usuario(user_js))
     if bloco is not None:
@@ -63,7 +69,10 @@ def aplicar_firefox(perfil: Path, url: str) -> None:
     else:
         atual = _ler_prefs(si._ler_arquivo_usuario(perfil / "prefs.js"))
         originais = {nome: atual.get(nome) for nome in _PREFS_FIREFOX}
-    prefs = {"network.proxy.type": "2", "network.proxy.autoconfig_url": json.dumps(url)}
+    if pelo_sistema:
+        prefs = {"network.proxy.type": "5"}
+    else:
+        prefs = {"network.proxy.type": "2", "network.proxy.autoconfig_url": json.dumps(url)}
     si._gravar_arquivo_usuario(user_js, _juntar(resto, _bloco_firefox(prefs, originais)))
 
 
@@ -233,18 +242,28 @@ class ResultadoNavegadores:
         return bool(self.perfis_firefox or self.chromium)
 
 
-def aplicar(url: str) -> ResultadoNavegadores:
+def aplicar(url: str, firefox_pelo_sistema: bool = False, chromium_pelo_sistema: bool = False) -> ResultadoNavegadores:
+    """Com `*_pelo_sistema` o navegador segue o proxy do sistema já gravado (veja o início do módulo)."""
     retorno = ResultadoNavegadores()
 
     for perfil in perfis_firefox():
         try:
-            aplicar_firefox(perfil, url)
+            aplicar_firefox(perfil, url, firefox_pelo_sistema)
             retorno.perfis_firefox += 1
         except _ERROS as exc:
             retorno.mensagens.append(f"Firefox ({perfil}): falhou: {si._erro_comando(exc)}")
-    if retorno.perfis_firefox:
+    if retorno.perfis_firefox and firefox_pelo_sistema:
+        retorno.mensagens.append(
+            f"Firefox: {retorno.perfis_firefox} perfil(is) seguindo o proxy do sistema; aberto, ele troca "
+            f"sozinho quando o motor liga (se estava com outro proxy configurado, feche e abra uma vez).")
+    elif retorno.perfis_firefox:
         retorno.mensagens.append(
             f"Firefox: {retorno.perfis_firefox} perfil(is) configurado(s). Feche e abra o Firefox para valer.")
+
+    if chromium_pelo_sistema:
+        # A flag faria o navegador ignorar o proxy do sistema; atalhos de versões anteriores saem.
+        retorno.mensagens.extend(_remover_atalhos())
+        return retorno
 
     pasta_usuario = _pasta_apps_usuario()
     pastas_sistema = _pastas_apps_sistema()
@@ -292,7 +311,11 @@ def remover(manter_atalhos: bool = False) -> list[str]:
 
     if manter_atalhos:
         return mensagens
+    return mensagens + _remover_atalhos()
 
+
+def _remover_atalhos() -> list[str]:
+    mensagens: list[str] = []
     removidos: list[str] = []
     pasta_usuario = _pasta_apps_usuario()
     atalhos: list[tuple[Path, str]] = []
@@ -307,7 +330,8 @@ def remover(manter_atalhos: bool = False) -> list[str]:
             atalhos.append((alvo, entrada))
     if atalhos and _chromium_aberto():
         mensagens.append("Navegador aberto: o atalho ajustado do menu será restaurado quando você "
-                         "fechá-lo e remover a integração de novo (sem o motor, ele conecta direto).")
+                         "fechá-lo e ligar o motor ou remover a integração de novo (sem o motor, ele "
+                         "conecta direto).")
         atalhos = []
     for alvo, entrada in atalhos:
         try:

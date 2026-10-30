@@ -177,3 +177,27 @@ def test_desativar_integracao_espera_navegador_fechar(home, tmp_path, monkeypatc
     monkeypatch.setattr(bp, "_chromium_aberto", lambda: False)
     bp.remover()
     assert not alvo.exists()
+
+
+def test_firefox_pelo_sistema_segue_o_proxy_do_sistema(home):
+    perfil = _perfil(home, prefs='user_pref("network.proxy.type", 1);\n')
+    retorno = bp.aplicar(PAC, firefox_pelo_sistema=True)
+    assert retorno.perfis_firefox == 1
+    assert bp._ler_prefs((perfil / "user.js").read_text(encoding="utf-8")) == {"network.proxy.type": "5"}
+    assert "troca sozinho" in " ".join(retorno.mensagens)
+
+    bp.remover()
+    assert not (perfil / "user.js").exists()
+    assert _preferencias(perfil) == {"network.proxy.type": "1"}
+
+
+def test_chromium_pelo_sistema_nao_cria_e_remove_atalhos(home, tmp_path):
+    (tmp_path / "usr-share/applications").mkdir(parents=True)
+    (tmp_path / "usr-share/applications/google-chrome.desktop").write_text(ATALHO_CHROME, encoding="utf-8")
+    bp.aplicar(PAC)
+    atalho = home / ".local/share/applications/google-chrome.desktop"
+    assert atalho.exists()
+
+    retorno = bp.aplicar(PAC, chromium_pelo_sistema=True)
+    assert retorno.chromium == []
+    assert not atalho.exists()
