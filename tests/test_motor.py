@@ -350,6 +350,8 @@ def test_pac_serve_pagina_de_teste_de_vazamento(monkeypatch):
             assert b'"ip_real": "203.0.113.7"' in pagina
             pac = await baixar("/proxy.pac")
             assert b"FindProxyForURL" in pac and b'return "DIRECT"' in pac
+            # Sem DIRECT de reserva: com o motor parado o navegador não pode seguir direto.
+            assert b'SOCKS5 127.0.0.1:%d"' % motor.configuracao.preferencias.porta_socks in pac
         finally:
             motor.parar()
 

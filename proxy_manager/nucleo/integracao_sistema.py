@@ -20,13 +20,17 @@ FornecedorPagina = Callable[[], Awaitable[str]]
 def gerar_script_pac(porta_socks: int, porta_http: int) -> str:
     """O PAC manda tudo para o proxy local; quem decide o destino são as regras. Assim toda
     conexão aparece no log, inclusive as diretas. Só o loopback vai direto: o motor recusaria
-    como loop o acesso às portas do próprio Veredo (a página de teste, por exemplo)."""
+    como loop o acesso às portas do próprio Veredo (a página de teste, por exemplo).
+
+    Não há "DIRECT" de reserva: o Chrome marca como ruim por minutos o proxy que falhou (o motor
+    parado) e, tendo outra opção, seguiria direto mesmo depois de o motor voltar. Sem ela, ele
+    insiste no proxy local e reconecta assim que o motor liga, sem expor o IP real."""
     return f"""\
 function FindProxyForURL(url, host) {{
     if (host === "localhost" || host === "::1" || host === "[::1]" || shExpMatch(host, "127.*")) {{
         return "DIRECT";
     }}
-    return "PROXY 127.0.0.1:{porta_http}; SOCKS5 127.0.0.1:{porta_socks}; DIRECT";
+    return "PROXY 127.0.0.1:{porta_http}; SOCKS5 127.0.0.1:{porta_socks}";
 }}
 """
 
