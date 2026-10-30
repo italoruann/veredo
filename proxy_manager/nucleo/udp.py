@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from typing import Awaitable, Callable, Optional
 
 from . import rede, socks5
-from .cliente_proxy import Rota, abrir_conexao_proxy
+from .cliente_proxy import Rota
 
 # Fluxos sem tráfego por esse tempo são fechados.
 OCIOSIDADE_FLUXO = 120.0
@@ -122,7 +122,7 @@ class SaidaSocks5:
     @staticmethod
     async def abrir(perfil, host: str, porta: int, ao_receber: Callable[[bytes], None],
                     timeout: float = 15.0) -> SaidaSocks5:
-        leitor, escritor = await abrir_conexao_proxy(perfil, timeout)
+        leitor, escritor = await rede.abrir_conexao(perfil.host, perfil.port, timeout=timeout)
         try:
             host_relay, porta_relay = await socks5.negociar_cliente(
                 leitor, escritor, "0.0.0.0", 0, perfil.usuario, perfil.senha, timeout,
@@ -304,8 +304,6 @@ class GerenciadorUdp:
     def _perfil_udp(rota: Optional[Rota]):
         if rota is None or not rota.perfis:
             raise ErroUdp("nenhum perfil de proxy disponível para esta regra")
-        if rota.tipo == "simples" and len(rota.perfis) > 1:
-            raise ErroUdp("UDP não passa por cadeias em sequência; use um perfil SOCKS5")
         for perfil in rota.perfis:
             if perfil.type == "socks5":
                 return perfil

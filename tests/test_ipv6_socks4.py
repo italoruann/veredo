@@ -46,7 +46,7 @@ def test_programa_socks4a_usa_a_porta_socks_local():
         motor.iniciar()
         try:
             perfil = PerfilProxy(type="socks4", host="127.0.0.1", port=PORTA_SOCKS)
-            leitor, escritor = await cliente_proxy.abrir_tunel([perfil], "localhost", porta_eco)
+            leitor, escritor = await cliente_proxy.abrir_tunel(perfil, "localhost", porta_eco)
             assert await _conversar(leitor, escritor) == b"ping"
             await asyncio.sleep(0.2)
             entrada = registro.recentes()[-1]
@@ -65,7 +65,7 @@ def test_socks4_bloqueado_recebe_recusa():
         try:
             perfil = PerfilProxy(type="socks4", host="127.0.0.1", port=PORTA_SOCKS)
             with pytest.raises(cliente_proxy.ErroSocks4):
-                await cliente_proxy.abrir_tunel([perfil], "10.0.0.1", 80)
+                await cliente_proxy.abrir_tunel(perfil, "10.0.0.1", 80)
         finally:
             motor.parar()
 
@@ -80,7 +80,7 @@ def test_socks5_com_destino_ipv6_e_regra_ipv6():
         motor.iniciar()
         try:
             perfil = PerfilProxy(type="socks5", host="127.0.0.1", port=PORTA_SOCKS)
-            leitor, escritor = await cliente_proxy.abrir_tunel([perfil], "::1", porta_eco)
+            leitor, escritor = await cliente_proxy.abrir_tunel(perfil, "::1", porta_eco)
             assert await _conversar(leitor, escritor) == b"ping"
             await asyncio.sleep(0.2)
             entrada = registro.recentes()[-1]

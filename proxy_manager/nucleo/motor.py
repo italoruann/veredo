@@ -8,16 +8,12 @@ import ipaddress
 import platform
 import threading
 import time
-from collections import OrderedDict
 from typing import Callable, Optional, Protocol
 
 from . import cliente_proxy, dns, processos, proxy_http, rede, socks5, teste_vazamento, udp, verificacao_ip
 from .cliente_proxy import Rota
-from .configuracao import Configuracao, PerfilProxy, Preferencias, pasta_dados
+from .configuracao import Configuracao, PerfilProxy, Preferencias
 from .integracao_sistema import gerar_script_pac, iniciar_servidor_pac
-from .interceptacao.certificados import AutoridadeCertificadora
-from .interceptacao.fluxos import ArmazemFluxos
-from .interceptacao.interceptador import Interceptador
 from .registro import EntradaLog, Registro
 from .regras import ConjuntoRegras, Resultado
 from .transparente import inspecao
@@ -28,8 +24,6 @@ CallbackIpSaida = Callable[[str, str, str], None]
 
 # O ip-api.com limita requisições por minuto; o IP de saída é reconsultado no máximo a cada 10 min.
 VALIDADE_CACHE_IP_SAIDA = 600.0
-# DNS personalizado: quantos IPs resolvidos guardam o nome consultado, para as regras por domínio.
-MAX_NOMES_RESOLVIDOS = 16384
 
 
 class BackendTransparente(Protocol):
@@ -87,13 +81,9 @@ async def _fechar_servidor(servidor: Optional[asyncio.AbstractServer]) -> None:
 
 
 class MotorProxy:
-    def __init__(self, configuracao: Configuracao, registro: Registro,
-                 fluxos: Optional[ArmazemFluxos] = None):
+    def __init__(self, configuracao: Configuracao, registro: Registro):
         self.configuracao = configuracao
         self.registro = registro
-        self.fluxos = fluxos if fluxos is not None else ArmazemFluxos()
-        self.autoridade = AutoridadeCertificadora(pasta_dados() / "interceptacao")
-        self.interceptador = Interceptador(self.autoridade, self.fluxos, lambda: self.configuracao.preferencias)
         self.conjunto_regras = ConjuntoRegras.interpretar(configuracao.texto_regras)
         self.ao_mudar_estado: Optional[CallbackEstado] = None
         self.ao_mudar_ip_saida: Optional[CallbackIpSaida] = None
@@ -109,8 +99,6 @@ class MotorProxy:
         self.servidor_dns: Optional[dns.ServidorDns] = None
         # Mantida entre reinícios do motor: programas guardam os IPs falsos em cache.
         self.tabela_dns = dns.TabelaIpsFalsos()
-        # DNS personalizado: IP real -> último nome que o resolveu (sem IP falso não há outra pista).
-        self.nomes_resolvidos: OrderedDict[str, str] = OrderedDict()
         self._escritores_ativos: set[asyncio.StreamWriter] = set()
         self._tarefas_fundo: set[asyncio.Task] = set()
         self.udp: Optional[udp.GerenciadorUdp] = None
@@ -236,8 +224,7 @@ class MotorProxy:
         try:
             self._servidor_socks = await asyncio.start_server(self._atender_socks, "127.0.0.1", prefs.porta_socks)
             self._servidor_http = await asyncio.start_server(self._atender_http, "127.0.0.1", prefs.porta_http)
-            self._servidor_pac = await iniciar_servidor_pac(self._texto_pac, prefs.porta_pac, self._pagina_teste,
-                                                           self.certificado_ca)
+            self._servidor_pac = await iniciar_servidor_pac(self._texto_pac, prefs.porta_pac, self._pagina_teste)
         except OSError as exc:
             self._emitir_estado(False, f"Não foi possível abrir as portas locais: {exc}")
             raise
@@ -293,14 +280,6 @@ class MotorProxy:
             prevenir_vazamento=prefs.prevenir_vazamento, proxy_sistema=prefs.integracao_sistema_ativa,
         ))
 
-    def certificado_ca(self) -> bytes:
-        """Certificado (PEM, só a parte pública) que os aplicativos precisam confiar para a
-        interceptação de HTTPS. É criado na primeira chamada."""
-        return self.autoridade.certificado_pem()
-
-    def recriar_ca(self) -> None:
-        self.autoridade.recriar()
-
     async def _encerrar(self) -> None:
         servidores = [s for s in (self._servidor_socks, self._servidor_http, self._servidor_pac,
                                   self._servidor_transparente) if s is not None]
@@ -342,10 +321,10 @@ class MotorProxy:
         await asyncio.to_thread(dns.limpar_cache_sistema)
         self._emitir_estado(False, "Motor parado")
 
-    # -- mudanças de porta com o motor ligado -----------------------------------------
+    # -- mudanças do modo transparente com o motor ligado -------------------------------
 
     def aplicar_ao_vivo(self, nova_configuracao: Configuracao) -> tuple[bool, str]:
-        """Reabre apenas as portas que mudaram, sem derrubar as conexões em andamento.
+        """Religa o modo transparente se ele mudou, sem derrubar as conexões em andamento.
 
         Itens que não puderem ser aplicados voltam ao valor anterior em `nova_configuracao`.
         Com o motor parado basta `atualizar_configuracao()`."""
@@ -363,35 +342,6 @@ class MotorProxy:
         novas = nova_configuracao.preferencias
         aplicados: list[str] = []
         erros: list[str] = []
-
-        if novas.porta_socks != antigas.porta_socks:
-            try:
-                self._servidor_socks = await self._trocar_servidor(
-                    self._servidor_socks, self._atender_socks, novas.porta_socks)
-                aplicados.append(f"SOCKS5 → porta {novas.porta_socks}")
-            except OSError as exc:
-                erros.append(f"porta SOCKS5 ({novas.porta_socks}): {exc}")
-                novas.porta_socks = antigas.porta_socks
-
-        if novas.porta_http != antigas.porta_http:
-            try:
-                self._servidor_http = await self._trocar_servidor(
-                    self._servidor_http, self._atender_http, novas.porta_http)
-                aplicados.append(f"HTTP → porta {novas.porta_http}")
-            except OSError as exc:
-                erros.append(f"porta HTTP ({novas.porta_http}): {exc}")
-                novas.porta_http = antigas.porta_http
-
-        if novas.porta_pac != antigas.porta_pac:
-            try:
-                novo = await iniciar_servidor_pac(self._texto_pac, novas.porta_pac, self._pagina_teste,
-                                                  self.certificado_ca)
-                await _fechar_servidor(self._servidor_pac)
-                self._servidor_pac = novo
-                aplicados.append(f"PAC → porta {novas.porta_pac}")
-            except OSError as exc:
-                erros.append(f"porta do PAC ({novas.porta_pac}): {exc}")
-                novas.porta_pac = antigas.porta_pac
 
         campos_transparente = ("modo_transparente_ativo", "porta_transparente", "modo_dns",
                                "dns_excecoes", "dns_servidores", "porta_dns", "prevenir_vazamento",
@@ -422,21 +372,12 @@ class MotorProxy:
         self._revisar_perfis()
 
         if aplicados:
-            # Também faz o contexto reaplicar o PAC no sistema, caso a porta dele tenha mudado.
             self._emitir_estado(True, "Configurações aplicadas sem parar o motor: " + ", ".join(aplicados) + ".")
         if erros:
             return False, "Alguns itens não puderam ser aplicados (mantidos como estavam): " + "; ".join(erros)
         if not aplicados:
-            return True, "Nada mudou nas portas/modo transparente."
+            return True, "Nada mudou no modo transparente."
         return True, "Aplicado sem parar o motor: " + ", ".join(aplicados) + "."
-
-    @staticmethod
-    async def _trocar_servidor(antigo: Optional[asyncio.AbstractServer], tratador,
-                               porta: int) -> asyncio.AbstractServer:
-        # Abre a porta nova antes de fechar a antiga: se falhar, a antiga continua funcionando.
-        novo = await asyncio.start_server(tratador, "127.0.0.1", porta)
-        await _fechar_servidor(antigo)
-        return novo
 
     async def _aplicar_modo_transparente(self, prefs: Preferencias) -> None:
         # O backend antigo precisa sair antes: os dois disputariam as mesmas regras de captura.
@@ -481,51 +422,14 @@ class MotorProxy:
         excecoes = dns.interpretar_excecoes(prefs.dns_excecoes)
         if platform.system() == "Linux":
             excecoes += dns.hosts_teste_conectividade()
-        if prefs.modo_dns_efetivo == "personalizado":
-            if not fixos:
-                raise RuntimeError("informe os servidores do DNS personalizado nas Configurações")
-            # As exceções (nomes da rede local) só o DNS da própria rede conhece.
-            do_sistema = dns.ResolvedorReal(dns.servidores_dns_sistema(),
-                                            fornecedor_servidores=dns.servidores_dns_sistema)
-            encaminhador = dns.EncaminhadorDns(fixos, self._caminho_dns, ao_resolver=self._anotar_nomes)
-            servidor = dns.ServidorDns(self.tabela_dns, do_sistema, excecoes, encaminhar=encaminhador.consultar)
-            # O próprio motor (conexões diretas, endereço dos proxies) consulta os mesmos servidores,
-            # mas direto: pelo proxy, achar o endereço do próprio proxy daria uma volta sem fim.
-            real = dns.ResolvedorReal(fixos)
-        else:
-            # Sem servidores ainda (a rede não subiu, o Wi-Fi está conectando) o motor liga mesmo
-            # assim: a lista do sistema é relida a cada consulta e as respostas voltam quando ela chegar.
-            servidores = fixos or dns.servidores_dns_sistema()
-            real = dns.ResolvedorReal(servidores, fornecedor_servidores=None if fixos else dns.servidores_dns_sistema)
-            servidor = dns.ServidorDns(self.tabela_dns, real, excecoes, bloquear_outros=prefs.prevenir_vazamento)
+        # Sem servidores ainda (a rede não subiu, o Wi-Fi está conectando) o motor liga mesmo
+        # assim: a lista do sistema é relida a cada consulta e as respostas voltam quando ela chegar.
+        servidores = fixos or dns.servidores_dns_sistema()
+        real = dns.ResolvedorReal(servidores, fornecedor_servidores=None if fixos else dns.servidores_dns_sistema)
+        servidor = dns.ServidorDns(self.tabela_dns, real, excecoes, bloquear_outros=prefs.prevenir_vazamento)
         await servidor.iniciar(prefs.porta_dns)
         self.servidor_dns = servidor
         rede.resolvedor = real.resolver
-
-    def _caminho_dns(self, host: str, porta: int) -> dns.Caminho:
-        """Por onde vai uma consulta ao servidor do DNS personalizado: as regras para o IP e a porta
-        dele, como uma conexão de um programa desconhecido (a consulta chega sem dono)."""
-        prefs = self.configuracao.preferencias
-        resultado = self.conjunto_regras.avaliar(processos.DESCONHECIDO.nome, "", host, _ip_literal(host),
-                                                 acao_padrao=prefs.acao_padrao, porta=porta)
-        resultado = self._evitar_loop(resultado, host, porta)
-        if resultado.tipo_acao != "proxy":
-            return resultado.tipo_acao
-        rota = self._resolver_rota(resultado)
-        if rota is None:
-            return "block"  # a regra pede proxy, mas não há nenhum: sair direto seria um vazamento
-
-        async def abrir():
-            leitor, escritor, _usado = await cliente_proxy.conectar_rota(rota, host, porta)
-            return leitor, escritor
-        return abrir
-
-    def _anotar_nomes(self, nome: str, enderecos: list[str]) -> None:
-        for endereco in enderecos:
-            self.nomes_resolvidos[endereco] = nome
-            self.nomes_resolvidos.move_to_end(endereco)
-        while len(self.nomes_resolvidos) > MAX_NOMES_RESOLVIDOS:
-            self.nomes_resolvidos.popitem(last=False)
 
     def _desligar_dns(self) -> None:
         if self.servidor_dns is not None:
@@ -544,7 +448,7 @@ class MotorProxy:
         if cadeia is None or not cadeia.ativo:
             return None
         return Rota(id=cadeia.id, nome=cadeia.nome, perfis=self.configuracao.perfis_da_cadeia(cadeia),
-                    tipo=cadeia.tipo, timeout=float(cadeia.timeout), eh_cadeia=True)
+                    timeout=float(cadeia.timeout), eh_cadeia=True)
 
     def _resolver_rota(self, resultado: Resultado) -> Optional[Rota]:
         if resultado.nome_cadeia:
@@ -556,7 +460,7 @@ class MotorProxy:
         return cliente_proxy.rota_do_perfil(perfil) if perfil else None
 
     def _chave_rota(self, rota: Rota) -> str:
-        return f"{rota.tipo}|" + "|".join(self._chave_cache_ip(p) for p in rota.perfis)
+        return "|".join(self._chave_cache_ip(p) for p in rota.perfis)
 
     def _portas_locais(self) -> set[int]:
         prefs = self.configuracao.preferencias
@@ -697,8 +601,8 @@ class MotorProxy:
         if rota is None:
             raise RuntimeError("nenhum perfil de proxy disponível para esta regra")
         leitor, escritor, usado = await cliente_proxy.conectar_rota(rota, host, porta)
-        if rota.eh_cadeia and usado is not None:
-            # Redundância/balanceamento: registra qual perfil da cadeia atendeu.
+        if rota.eh_cadeia:
+            # Registra qual perfil da cadeia atendeu.
             self.registro.atualizar(entrada.id, proxy_usado=f"{rota.nome} → {usado.nome}")
             self._anotar_ip_saida(usado, entrada)
         return leitor, escritor
@@ -762,13 +666,11 @@ class MotorProxy:
             return
 
         # Mesmo via proxy o túnel já termina no servidor de destino, que recebe a forma de origem;
-        # credenciais do proxy nunca vão nesta requisição. Com a interceptação ligada, quem a envia
-        # é o interceptador, que a registra como o primeiro fluxo da conexão.
+        # credenciais do proxy nunca vão nesta requisição.
         requisicao = b"" if eh_connect else proxy_http.requisicao_forma_origem(cabecalho)
-        interceptar = self.interceptador.ativo
         try:
             leitor_destino, escritor_destino = await self._conectar_destino(resultado, rota, host, porta, entrada)
-            if requisicao and not interceptar:
+            if requisicao:
                 escritor_destino.write(requisicao)
                 await escritor_destino.drain()
         except Exception as exc:
@@ -779,8 +681,7 @@ class MotorProxy:
         if eh_connect:
             escritor.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
             await escritor.drain()
-        await self._tunelar(leitor, escritor, leitor_destino, escritor_destino, resultado, rota, entrada, inicio,
-                            interceptar=interceptar, prefixo_cliente=requisicao if interceptar else b"")
+        await self._tunelar(leitor, escritor, leitor_destino, escritor_destino, resultado, rota, entrada, inicio)
 
     async def _atender_transparente(self, leitor: asyncio.StreamReader, escritor: asyncio.StreamWriter) -> None:
         inicio = time.monotonic()
@@ -815,7 +716,7 @@ class MotorProxy:
 
         resultado, rota, entrada = await self._preparar(
             host, porta, origem[0], origem[1], self.configuracao.preferencias.porta_transparente,
-            "transparente", host_regras=host_detectado or nome_falso or self.nomes_resolvidos.get(host),
+            "transparente", host_regras=host_detectado or nome_falso,
             destino_original=destino)
 
         if resultado.tipo_acao == "block":
@@ -823,12 +724,10 @@ class MotorProxy:
             self._finalizar_bloqueada(entrada, inicio, resultado)
             return
 
-        # Com a interceptação, o prefixo (ClientHello ou requisição) vai para o interceptador.
-        interceptar = self.interceptador.ativo
         try:
             # Conecta ao IP original para não depender de uma nova resolução de DNS.
             leitor_destino, escritor_destino = await self._conectar_destino(resultado, rota, host, porta, entrada)
-            if prefixo and not interceptar:
+            if prefixo:
                 escritor_destino.write(prefixo)
                 await escritor_destino.drain()
         except Exception as exc:
@@ -839,8 +738,7 @@ class MotorProxy:
         if prefixo:
             self._contar(len(prefixo), enviado=True, via_proxy=resultado.tipo_acao == "proxy")
         await self._tunelar(leitor, escritor, leitor_destino, escritor_destino, resultado, rota, entrada, inicio,
-                            ja_enviados=len(prefixo), interceptar=interceptar,
-                            prefixo_cliente=prefixo if interceptar else b"")
+                            ja_enviados=len(prefixo))
 
     # -- UDP --------------------------------------------------------------------------
 
@@ -986,27 +884,15 @@ class MotorProxy:
     async def _tunelar(self, leitor: asyncio.StreamReader, escritor: asyncio.StreamWriter,
                        leitor_destino: asyncio.StreamReader, escritor_destino: asyncio.StreamWriter,
                        resultado: Resultado, rota: Optional[Rota], entrada: EntradaLog, inicio: float,
-                       ja_enviados: int = 0, interceptar: Optional[bool] = None,
-                       prefixo_cliente: bytes = b"") -> None:
-        """`interceptar`: decidido por quem chama quando ele já leu bytes do aplicativo; esses bytes
-        vêm em `prefixo_cliente` (sem a interceptação, quem chama já os enviou ao destino)."""
-        if interceptar is None:
-            interceptar = self.interceptador.ativo
+                       ja_enviados: int = 0) -> None:
         self.conexoes_ativas += 1
         self._escritores_ativos.update((escritor, escritor_destino))
         if resultado.tipo_acao == "proxy" and rota is not None:
             self._tuneis_proxy[entrada.id] = (rota.id, self._chave_rota(rota), (escritor, escritor_destino))
         via_proxy = resultado.tipo_acao == "proxy"
         try:
-            if interceptar:
-                enviados, recebidos = await self.interceptador.atender(
-                    leitor, escritor, leitor_destino, escritor_destino, host=entrada.host_destino,
-                    porta=entrada.porta_destino, processo=entrada.nome_processo, id_conexao=entrada.id,
-                    prefixo_cliente=prefixo_cliente,
-                    contar=lambda n, enviado: self._contar(n, enviado, via_proxy))
-            else:
-                enviados, recebidos = await self._encaminhar(
-                    leitor, escritor, leitor_destino, escritor_destino, via_proxy=via_proxy)
+            enviados, recebidos = await self._encaminhar(
+                leitor, escritor, leitor_destino, escritor_destino, via_proxy=via_proxy)
         finally:
             self.conexoes_ativas -= 1
             self._escritores_ativos.discard(escritor)

@@ -1,5 +1,5 @@
-"""Configurações: portas locais, proxy do sistema, ação padrão, logs, preferências gerais,
-modo transparente e serviço do sistema."""
+"""Configurações: proxy do sistema, ação padrão, logs, preferências gerais, modo transparente e
+serviço do sistema."""
 from __future__ import annotations
 
 import threading
@@ -59,7 +59,6 @@ class PaginaConfiguracoes(QWidget):
         titulo.setObjectName("TituloSecao")
         raiz.addWidget(titulo)
 
-        raiz.addWidget(self._criar_cartao_portas())
         raiz.addWidget(self._criar_cartao_integracao())
         raiz.addWidget(self._criar_cartao_acao_padrao())
         raiz.addWidget(self._criar_cartao_logs())
@@ -67,63 +66,6 @@ class PaginaConfiguracoes(QWidget):
         raiz.addWidget(self._criar_cartao_transparente())
         raiz.addWidget(self._criar_cartao_servico())
         raiz.addStretch(1)
-
-    # -- portas -----------------------------------------------------------------
-
-    def _criar_cartao_portas(self) -> QFrame:
-        quadro, layout = _cartao("Portas locais")
-        form = QFormLayout()
-        preferencias = self.ctx.configuracao.preferencias
-
-        self.campo_porta_socks = QSpinBox()
-        self.campo_porta_socks.setRange(1024, 65535)
-        self.campo_porta_socks.setValue(preferencias.porta_socks)
-        self.campo_porta_http = QSpinBox()
-        self.campo_porta_http.setRange(1024, 65535)
-        self.campo_porta_http.setValue(preferencias.porta_http)
-        self.campo_porta_pac = QSpinBox()
-        self.campo_porta_pac.setRange(1024, 65535)
-        self.campo_porta_pac.setValue(preferencias.porta_pac)
-
-        form.addRow("Porta SOCKS5", self.campo_porta_socks)
-        form.addRow("Porta HTTP/HTTPS", self.campo_porta_http)
-        form.addRow("Porta do arquivo PAC", self.campo_porta_pac)
-        layout.addLayout(form)
-
-        dica = QLabel("Sempre em 127.0.0.1 (apenas local). Se o motor estiver ativo, "
-                      "ele será reiniciado automaticamente ao salvar.")
-        dica.setObjectName("DicaCartao")
-        dica.setWordWrap(True)
-        layout.addWidget(dica)
-
-        botao_salvar = QPushButton("Salvar portas")
-        botao_salvar.setObjectName("BotaoPrincipal")
-        botao_salvar.clicked.connect(self._ao_salvar_portas)
-        linha = QHBoxLayout()
-        linha.addStretch(1)
-        linha.addWidget(botao_salvar)
-        layout.addLayout(linha)
-        return quadro
-
-    def _ao_salvar_portas(self) -> None:
-        preferencias = self.ctx.configuracao.preferencias
-        preferencias.porta_socks = self.campo_porta_socks.value()
-        preferencias.porta_http = self.campo_porta_http.value()
-        preferencias.porta_pac = self.campo_porta_pac.value()
-
-        if self.ctx.motor.em_execucao():
-            ok, mensagem = self.ctx.aplicar_ao_vivo()
-            # Portas que não puderam ser trocadas voltaram ao valor anterior.
-            self.campo_porta_socks.setValue(preferencias.porta_socks)
-            self.campo_porta_http.setValue(preferencias.porta_http)
-            self.campo_porta_pac.setValue(preferencias.porta_pac)
-            if ok:
-                QMessageBox.information(self, "Portas", mensagem)
-            else:
-                QMessageBox.warning(self, "Portas", mensagem)
-        else:
-            self.ctx.aplicar_mudancas()
-            QMessageBox.information(self, "Portas", "Portas atualizadas.")
 
     # -- integração com o sistema -----------------------------------------------
 
@@ -325,13 +267,6 @@ class PaginaConfiguracoes(QWidget):
         self.caixa_transparente.setChecked(preferencias.modo_transparente_ativo)
         layout.addWidget(caixa_com_quebra(self.caixa_transparente))
 
-        form = QFormLayout()
-        self.campo_porta_transparente = QSpinBox()
-        self.campo_porta_transparente.setRange(1024, 65535)
-        self.campo_porta_transparente.setValue(preferencias.porta_transparente)
-        form.addRow("Porta do listener transparente", self.campo_porta_transparente)
-        layout.addLayout(form)
-
         dica = QLabel(
             "Intercepta as conexões no próprio sistema, inclusive de programas que ignoram a "
             f"configuração de proxy. Exige abrir o {NOME_EXIBICAO} como administrador (Windows) "
@@ -352,19 +287,17 @@ class PaginaConfiguracoes(QWidget):
         self.combo_dns = QComboBox()
         self.combo_dns.addItem("DNS do sistema (sem desvio)", "sistema")
         self.combo_dns.addItem("DNS do proxy", "proxy")
-        self.combo_dns.addItem("DNS personalizado", "personalizado")
         self.campo_dns_servidores = QLineEdit(preferencias.dns_servidores)
+        self.campo_dns_servidores.setPlaceholderText("automático (os do sistema)")
+        self.campo_dns_servidores.setToolTip(
+            "Servidores DNS reais usados pelo próprio Veredo e para os nomes locais, separados "
+            "por ponto e vírgula (ex.: 192.168.1.1; 1.1.1.1). Porta opcional: 192.168.1.1:5353")
         self.campo_dns_excecoes = QLineEdit(preferencias.dns_excecoes)
         self.campo_dns_excecoes.setToolTip(
             "Nomes resolvidos pelo DNS da sua rede (nomes locais), separados por ponto e vírgula")
-        self.campo_porta_dns = QSpinBox()
-        self.campo_porta_dns.setRange(1024, 65535)
-        self.campo_porta_dns.setValue(preferencias.porta_dns)
-        self.rotulo_dns_servidores = QLabel()
         form_dns.addRow("DNS", self.combo_dns)
-        form_dns.addRow(self.rotulo_dns_servidores, self.campo_dns_servidores)
+        form_dns.addRow("Servidores DNS reais", self.campo_dns_servidores)
         form_dns.addRow("Resolver pela rede local", self.campo_dns_excecoes)
-        form_dns.addRow("Porta do DNS local", self.campo_porta_dns)
         layout.addLayout(form_dns)
 
         self.dica_dns = QLabel()
@@ -391,7 +324,7 @@ class PaginaConfiguracoes(QWidget):
         layout.addWidget(caixa_com_quebra(self.caixa_udp))
         dica_udp = QLabel(
             "Cada fluxo UDP segue as regras como uma conexão: direto, bloqueado ou por um proxy "
-            "SOCKS5 que aceite UDP (HTTP, HTTPS e SOCKS4 não transportam UDP). Com a prevenção "
+            "SOCKS5 que aceite UDP (HTTP e SOCKS4 não transportam UDP). Com a prevenção "
             "de vazamento, o UDP que iria direto é bloqueado. Desligado, só o QUIC é bloqueado."
         )
         dica_udp.setWordWrap(True)
@@ -399,7 +332,7 @@ class PaginaConfiguracoes(QWidget):
         layout.addWidget(dica_udp)
 
         self._widgets_dns = [self.combo_dns, self.campo_dns_excecoes, self.campo_dns_servidores,
-                             self.campo_porta_dns, self.caixa_vazamento, self.caixa_udp]
+                             self.caixa_vazamento, self.caixa_udp]
         self.caixa_transparente.toggled.connect(self._atualizar_widgets_dns)
         self.caixa_vazamento.toggled.connect(self._atualizar_widgets_dns)
         self._atualizar_widgets_dns()
@@ -429,62 +362,34 @@ class PaginaConfiguracoes(QWidget):
             # A prevenção de vazamento sempre usa o DNS do proxy.
             self._selecionar_modo_dns("proxy")
             self.combo_dns.setEnabled(False)
-        modo = self.combo_dns.currentData()
-        desviado = modo != "sistema"
-        for widget in (self.campo_dns_servidores, self.campo_dns_excecoes, self.campo_porta_dns):
+        desviado = self.combo_dns.currentData() != "sistema"
+        for widget in (self.campo_dns_servidores, self.campo_dns_excecoes):
             widget.setEnabled(transparente and desviado)
-        if modo == "personalizado":
-            self.rotulo_dns_servidores.setText("Servidores DNS")
-            self.campo_dns_servidores.setPlaceholderText("ex.: 1.1.1.1; 8.8.8.8")
-            self.campo_dns_servidores.setToolTip(
-                "Servidores que respondem às consultas, na ordem, separados por ponto e vírgula. "
-                "Porta opcional: 9.9.9.9:53. IPv6 entre colchetes: [2606:4700::1111]")
-            self.dica_dns.setText(
-                "As consultas dos programas vão aos servidores escolhidos, pelo caminho que as regras "
-                "mandam para o IP de cada um: com a regra pelo proxy, por TCP através do proxy (o "
-                "provedor não vê); com a regra direto, por UDP. A consulta não tem dono, então vale "
-                "como um programa desconhecido: para garantir o caminho, crie uma regra com o IP, "
-                "como 1.1.1.1:53 +proxy:Nome. Proxies HTTP costumam recusar a porta 53.")
-        else:
-            self.rotulo_dns_servidores.setText("Servidores DNS reais")
-            self.campo_dns_servidores.setPlaceholderText("automático (os do sistema)")
-            self.campo_dns_servidores.setToolTip(
-                "Servidores DNS reais usados pelo próprio Veredo e para os nomes locais, separados "
-                "por ponto e vírgula (ex.: 192.168.1.1; 1.1.1.1). Porta opcional: 192.168.1.1:5353")
-            self.dica_dns.setText(
-                "Os programas recebem endereços falsos (198.18.x.x) e o nome do site vai para o proxy, "
-                "que faz a consulta DNS do lado dele. Assim as regras por domínio valem para qualquer "
-                "programa e o seu provedor não vê quais sites você acessa pelo proxy."
-                if modo == "proxy" else
-                "As consultas DNS não são desviadas: os programas usam o DNS do sistema, que o seu "
-                "provedor vê. As regras por domínio valem pelo nome que o navegador envia (SNI/Host).")
+        self.dica_dns.setText(
+            "Os programas recebem endereços falsos (198.18.x.x) e o nome do site vai para o proxy, "
+            "que faz a consulta DNS do lado dele. Assim as regras por domínio valem para qualquer "
+            "programa e o seu provedor não vê quais sites você acessa pelo proxy."
+            if desviado else
+            "As consultas DNS não são desviadas: os programas usam o DNS do sistema, que o seu "
+            "provedor vê. As regras por domínio valem pelo nome que o navegador envia (SNI/Host).")
 
     def _carregar_transparente(self) -> None:
         preferencias = self.ctx.configuracao.preferencias
         self.caixa_transparente.setChecked(preferencias.modo_transparente_ativo and transparente_suportado())
-        self.campo_porta_transparente.setValue(preferencias.porta_transparente)
         self.caixa_vazamento.setChecked(preferencias.prevenir_vazamento)
         self._selecionar_modo_dns(preferencias.modo_dns)
         self.campo_dns_excecoes.setText(preferencias.dns_excecoes)
         self.campo_dns_servidores.setText(preferencias.dns_servidores)
-        self.campo_porta_dns.setValue(preferencias.porta_dns)
         self.caixa_udp.setChecked(preferencias.udp_pelas_regras)
         self._atualizar_widgets_dns()
 
     def _ao_salvar_transparente(self) -> None:
-        if (self.combo_dns.currentData() == "personalizado" and not self.caixa_vazamento.isChecked()
-                and not self.campo_dns_servidores.text().strip()):
-            self.rotulo_transparente.setText("Informe ao menos um servidor para o DNS personalizado.")
-            self.campo_dns_servidores.setFocus()
-            return
         preferencias = self.ctx.configuracao.preferencias
         preferencias.modo_transparente_ativo = self.caixa_transparente.isChecked()
-        preferencias.porta_transparente = self.campo_porta_transparente.value()
         preferencias.prevenir_vazamento = self.caixa_vazamento.isChecked()
         preferencias.modo_dns = "proxy" if preferencias.prevenir_vazamento else self.combo_dns.currentData()
         preferencias.dns_excecoes = self.campo_dns_excecoes.text().strip()
         preferencias.dns_servidores = self.campo_dns_servidores.text().strip()
-        preferencias.porta_dns = self.campo_porta_dns.value()
         preferencias.udp_pelas_regras = self.caixa_udp.isChecked()
 
         if self.ctx.motor.em_execucao():

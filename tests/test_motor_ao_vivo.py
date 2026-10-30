@@ -1,6 +1,5 @@
-"""Mudanças de porta e do modo transparente com o motor ligado, sem derrubar conexões abertas."""
+"""Mudanças do modo transparente e das regras com o motor ligado, sem derrubar conexões abertas."""
 import asyncio
-import socket
 from dataclasses import replace
 
 from proxy_manager.nucleo.configuracao import Configuracao, Preferencias
@@ -40,16 +39,7 @@ async def _iniciar_servidor_eco():
     return servidor, port
 
 
-async def _baixar_pac(port: int) -> bytes:
-    leitor, escritor = await asyncio.open_connection("127.0.0.1", port)
-    escritor.write(b"GET /proxy.pac HTTP/1.1\r\n\r\n")
-    await escritor.drain()
-    dados = await leitor.read(-1)
-    escritor.close()
-    return dados
-
-
-def test_trocar_porta_nao_derruba_conexao_aberta():
+def test_aplicar_ao_vivo_nao_derruba_conexao_aberta():
     async def cenario():
         servidor_destino, porta_destino = await _iniciar_servidor_eco()
         motor, _registro = _criar_motor()
@@ -60,9 +50,9 @@ def test_trocar_porta_nao_derruba_conexao_aberta():
             await escritor.drain()
             assert await leitor.read(5) == b"ping1"
 
-            # troca a porta do PAC (não tem nada a ver com essa conexão SOCKS5 já aberta)
-            prefs_novas = replace(motor.configuracao.preferencias, porta_pac=PORTA_PAC + 1)
-            nova_configuracao = Configuracao(proxies=[], texto_regras=motor.configuracao.texto_regras, preferencias=prefs_novas)
+            # troca as regras (não tem nada a ver com essa conexão SOCKS5 já aberta)
+            nova_configuracao = Configuracao(proxies=[], texto_regras="127.0.0.1 +direct\n*.exemplo.com +block\n",
+                                             preferencias=motor.configuracao.preferencias)
             ok, mensagem = motor.aplicar_ao_vivo(nova_configuracao)
             assert ok is True, mensagem
 
@@ -77,31 +67,6 @@ def test_trocar_porta_nao_derruba_conexao_aberta():
     asyncio.run(cenario())
 
 
-def test_trocar_porta_pac_move_o_servidor():
-    async def cenario():
-        motor, _registro = _criar_motor()
-        motor.iniciar()
-        try:
-            assert b"200" in await _baixar_pac(PORTA_PAC)
-
-            prefs_novas = replace(motor.configuracao.preferencias, porta_pac=PORTA_PAC + 2)
-            nova_configuracao = Configuracao(proxies=[], texto_regras=motor.configuracao.texto_regras, preferencias=prefs_novas)
-            ok, mensagem = motor.aplicar_ao_vivo(nova_configuracao)
-            assert ok is True, mensagem
-            assert motor.configuracao.preferencias.porta_pac == PORTA_PAC + 2
-
-            assert b"200" in await _baixar_pac(PORTA_PAC + 2)
-            try:
-                await asyncio.wait_for(asyncio.open_connection("127.0.0.1", PORTA_PAC), timeout=1)
-                assert False, "a porta antiga do PAC deveria ter parado de aceitar conexões"
-            except (ConnectionRefusedError, asyncio.TimeoutError, OSError):
-                pass
-        finally:
-            motor.parar()
-
-    asyncio.run(cenario())
-
-
 def test_aplicar_ao_vivo_com_motor_parado_da_erro():
     motor, _registro = _criar_motor()
     nova_configuracao = Configuracao(proxies=[], texto_regras=motor.configuracao.texto_regras, preferencias=motor.configuracao.preferencias)
@@ -110,37 +75,6 @@ def test_aplicar_ao_vivo_com_motor_parado_da_erro():
 
     assert ok is False
     assert "não está em execução" in mensagem
-
-
-def test_aplicar_ao_vivo_reverte_porta_ocupada():
-    async def cenario():
-        motor, _registro = _criar_motor()
-        motor.iniciar()
-        porta_ocupada = 58909
-        ocupante = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        ocupante.bind(("127.0.0.1", porta_ocupada))
-        ocupante.listen(1)
-        try:
-            prefs_novas = replace(motor.configuracao.preferencias, porta_socks=porta_ocupada)
-            nova_configuracao = Configuracao(proxies=[], texto_regras=motor.configuracao.texto_regras, preferencias=prefs_novas)
-
-            ok, mensagem = motor.aplicar_ao_vivo(nova_configuracao)
-
-            assert ok is False
-            assert str(porta_ocupada) in mensagem
-            # a config reflete a porta REAL que continua escutando, não a que falhou
-            assert motor.configuracao.preferencias.porta_socks == PORTA_SOCKS
-
-            # e a porta antiga continua aceitando conexões normalmente (só confirma que o
-            # listener segue de pé; não precisa completar um CONNECT de verdade pra isso)
-            leitor, escritor = await asyncio.wait_for(
-                asyncio.open_connection("127.0.0.1", PORTA_SOCKS), timeout=2)
-            escritor.close()
-        finally:
-            ocupante.close()
-            motor.parar()
-
-    asyncio.run(cenario())
 
 
 def test_aplicar_ao_vivo_liga_e_desliga_transparente(monkeypatch):

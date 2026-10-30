@@ -427,30 +427,6 @@ class _EventoFecharFalso:
         self.ignored = True
 
 
-def test_trocar_porta_sem_parar_motor(window):
-    """Trocar a porta com o motor ligado reabre só aquela porta."""
-    ctx = window.ctx
-    ctx.configuracao.preferencias.porta_socks = 58910
-    ctx.configuracao.preferencias.porta_http = 58911
-    ctx.configuracao.preferencias.porta_pac = 58912
-
-    window.alternar_motor()
-    QTest.qWait(300)
-    assert ctx.motor.em_execucao()
-
-    window.abrir_dialogo_perfil(2)
-    pagina = window.pagina_configuracoes
-    pagina.campo_porta_socks.setValue(58910)  # sem mudança
-    pagina.campo_porta_http.setValue(58911)  # sem mudança
-    pagina.campo_porta_pac.setValue(58913)  # só o PAC muda
-    pagina._ao_salvar_portas()
-    QTest.qWait(200)
-
-    # o motor nunca parou (é exatamente o que "trocar sem derrubar" significa)
-    assert pagina.ctx.motor.em_execucao()
-    assert pagina.ctx.configuracao.preferencias.porta_pac == 58913
-
-
 def test_fechar_sem_bandeja_encerra_app(window, app, monkeypatch):
     """Sem bandeja, fechar a janela encerra o app em vez de escondê-lo."""
     window.bandeja = None
@@ -552,54 +528,21 @@ def test_sair_para_o_motor_do_servico(window):
     assert chamadas == ["parar", "desconectar"]
 
 
-def test_inspetor_mostra_fluxos_filtra_e_liga_a_interceptacao(window):
-    from proxy_manager.nucleo.interceptacao.fluxos import Fluxo
-
-    window.abrir_inspetor()
-    inspetor = window.inspetor
-    assert inspetor.pilha_lista.currentIndex() == 1  # ajuda enquanto não há fluxos
-    ctx = window.ctx
-    ctx.fluxos.adicionar(Fluxo(esquema="https", metodo="POST", host="api.exemplo.com", porta=443,
-                               caminho="/v1/itens", cabecalhos_requisicao=[("Content-Type", "application/json")],
-                               corpo_requisicao=b'{"a":1}', tamanho_requisicao=7, status=201, estado="concluido",
-                               cabecalhos_resposta=[("Content-Type", "application/json")],
-                               corpo_resposta=b'{"ok":true}', tamanho_resposta=11))
-    ctx.fluxos.adicionar(Fluxo(metodo="GET", host="outro.com", porta=80, caminho="/", status=404,
-                               estado="concluido"))
-    ctx._descarregar_pendentes()
-    assert inspetor.modelo.rowCount() == 2 and inspetor.pilha_lista.currentIndex() == 0
-
-    inspetor.tabela.selectRow(0)
-    assert "POST https://api.exemplo.com/v1/itens" in inspetor.painel_requisicao.primeira_linha.text()
-    assert inspetor.painel_resposta.corpo.combo_modo.currentText() == "Automático"
-    assert '"ok": true' in inspetor.painel_resposta.corpo.texto.toPlainText()  # JSON formatado
-
-    inspetor.campo_filtro.setText("status:4")
-    assert inspetor.modelo.rowCount() == 1 and inspetor.modelo.fluxo_em(0).host == "outro.com"
-    inspetor.campo_filtro.setText("")
-
-    inspetor.acao_interceptar.setChecked(True)
-    assert ctx.configuracao.preferencias.interceptacao_ativa
-    inspetor.acao_interceptar.setChecked(False)
-    assert not ctx.configuracao.preferencias.interceptacao_ativa
-    inspetor.limpar()
-    assert inspetor.modelo.rowCount() == 0
-
-
 def test_escolha_do_modo_dns(window):
     window.abrir_dialogo_perfil(2)
     pagina = window.pagina_configuracoes
     prefs = pagina.ctx.configuracao.preferencias
     pagina.caixa_transparente.setChecked(True)
-    pagina.combo_dns.setCurrentIndex(pagina.combo_dns.findData("personalizado"))
-    assert pagina.rotulo_dns_servidores.text() == "Servidores DNS"
-    # sem servidor não salva
-    pagina.campo_dns_servidores.setText("")
+    pagina.combo_dns.setCurrentIndex(pagina.combo_dns.findData("sistema"))
+    assert not pagina.campo_dns_servidores.isEnabled()
     pagina._ao_salvar_transparente()
-    assert prefs.modo_dns != "personalizado"
+    assert prefs.modo_dns == "sistema"
+    pagina.combo_dns.setCurrentIndex(pagina.combo_dns.findData("proxy"))
+    assert pagina.campo_dns_servidores.isEnabled()
     pagina.campo_dns_servidores.setText("1.1.1.1; 8.8.8.8")
     pagina._ao_salvar_transparente()
-    assert (prefs.modo_dns, prefs.dns_servidores) == ("personalizado", "1.1.1.1; 8.8.8.8")
+    assert (prefs.modo_dns, prefs.dns_servidores) == ("proxy", "1.1.1.1; 8.8.8.8")
+    pagina.combo_dns.setCurrentIndex(pagina.combo_dns.findData("sistema"))
     # a prevenção de vazamento prende o seletor no DNS do proxy
     pagina.caixa_vazamento.setChecked(True)
     assert pagina.combo_dns.currentData() == "proxy" and not pagina.combo_dns.isEnabled()

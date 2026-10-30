@@ -3,10 +3,8 @@
 Cliente de proxy para Windows, Linux e macOS. Você diz quais programas e quais sites passam pelo
 proxy, quais vão direto e quais são bloqueados, e acompanha cada conexão em tempo real.
 
-Funciona com proxies SOCKS5, SOCKS4/4A, HTTP e HTTPS, com ou sem usuário e senha, permite ter
-vários perfis cadastrados ao mesmo tempo e encadeá-los (cadeias de proxy). Também intercepta o
-tráfego HTTP e HTTPS, como o mitmproxy, e mostra cada requisição e resposta com cabeçalhos e
-corpos no inspetor de tráfego.
+Funciona com proxies SOCKS5, SOCKS4/4A e HTTP, com ou sem usuário e senha, e permite ter vários
+perfis cadastrados ao mesmo tempo, inclusive como reserva um do outro (cadeias de proxy).
 
 > O projeto está em fase de testes. Se encontrar algum problema, abra uma issue contando o
 > sistema operacional, o que você fez e o que apareceu no log.
@@ -74,47 +72,6 @@ endereço nele. A página confere, de dentro do navegador:
   passa pelo Veredo, então é comum o IP real aparecer aqui.
 - **DNS:** a situação conforme a configuração (DNS pelo proxy no modo transparente ou não).
 
-## Inspetor de tráfego (interceptação HTTP/HTTPS)
-
-**Arquivo > Inspetor de tráfego** (Ctrl+I) abre uma janela com cada requisição HTTP/HTTPS que
-passa pelo Veredo: método, URL, status, tipo, tamanho, tempo e aplicativo. Ao selecionar uma,
-aparecem os cabeçalhos e o corpo da requisição e da resposta. O corpo é mostrado como texto,
-JSON formatado, hexadecimal ou imagem, e gzip, deflate e zstd são descomprimidos.
-
-1. Clique em **Interceptar**. Só as conexões abertas depois disso são interceptadas.
-2. Instale o certificado em **Certificado > Instalar no sistema**. O Veredo cria uma autoridade
-   certificadora (CA) local na primeira vez. No Windows ela vai para as raízes confiáveis do
-   usuário, que valem para Chrome, Edge e Firefox. No Linux ela vai para o repositório da
-   distribuição (pede a senha); o Firefox no Linux precisa importá-la à mão. Com o motor
-   ligado, o certificado também pode ser baixado em `http://127.0.0.1:58090/veredo-ca.crt`.
-3. Use os programas normalmente. O tráfego chega ao Veredo como sempre (proxy do sistema,
-   portas locais ou modo transparente) e as regras continuam valendo: a interceptação acontece
-   depois delas, inclusive nas conexões que passam por proxy ou por cadeia.
-
-Para filtrar a lista, digite qualquer trecho da URL. Também dá para filtrar por campo, com
-`metodo:post`, `status:4` (todos os 4xx), `host:api` e `app:chrome`. Pelo menu de contexto você
-copia a URL, copia a requisição como comando cURL, salva o corpo ou deixa de interceptar um
-host. **Exportar HAR** salva os fluxos exibidos num arquivo que o DevTools dos navegadores, o
-Insomnia e o Charles abrem.
-
-Em **Configurar** você limita a interceptação a alguns hosts (`*.exemplo.com; api.site.com`),
-define as exceções, escolhe quanto de cada corpo guardar (o corpo inteiro é repassado mesmo
-acima do limite) e decide se servidores com certificado inválido são recusados.
-
-Detalhes:
-
-- Os fluxos ficam só na memória (podem conter senhas e cookies) e somem ao fechar o Veredo.
-- Conexões que não são HTTP (SSH, SMTP, IMAP...) passam sem alteração. O Veredo percebe isso
-  quando o servidor fala primeiro ou quando os bytes não são TLS nem HTTP.
-- O HTTP/2 é negociado como HTTP/1.1, e WebSockets aparecem como `101 WebSocket` e continuam
-  funcionando, mas as mensagens deles não são mostradas.
-- O Veredo tira o `br` do `Accept-Encoding`, porque não consegue descomprimir brotli.
-- Aplicativos com certificado fixo (pinning) recusam a interceptação. Eles aparecem na lista
-  como `TLS / Erro`; ponha esses hosts nas exceções.
-- A CA fica em `interceptacao/` na pasta de dados. A chave privada nunca sai da máquina.
-  Remova o certificado do sistema quando não precisar mais da interceptação. No modo serviço
-  a CA é a do serviço, então instale-a pelo inspetor depois de ligar o serviço.
-
 ## Regras
 
 As regras podem ser editadas em uma tabela ou como texto. As duas formas mostram a mesma coisa.
@@ -168,17 +125,14 @@ Alguns detalhes:
 ## Cadeias de proxy
 
 Em **Perfil > Cadeias de proxy** (Ctrl+4) você junta perfis numa cadeia e a usa nas regras com
-`+chain:Nome`. Há três tipos:
-
-- **Simples:** a conexão passa por todos os proxies, um dentro do outro, na ordem da lista.
-- **Redundância:** usa o primeiro que responder; se ele cair, tenta o próximo.
-- **Balanceamento:** alterna o proxy de saída a cada conexão, pulando os que não respondem.
+`+chain:Nome`. Os perfis da cadeia são reserva um do outro: cada conexão usa o primeiro da lista
+e, se ele não responder dentro do tempo limite, tenta o próximo.
 
 ## Importar e exportar perfil
 
 **Arquivo > Exportar perfil** grava proxies, cadeias, aplicativos e regras num arquivo JSON (as
-senhas vão junto só se você pedir). **Arquivo > Importar perfil** lê esse arquivo ou um perfil
-`.ppx` do Proxifier, substituindo a configuração atual depois de confirmar.
+senhas vão junto só se você pedir). **Arquivo > Importar perfil** lê esse arquivo,
+substituindo a configuração atual depois de confirmar.
 
 ## Como o tráfego chega ao Veredo
 
@@ -219,19 +173,12 @@ sistema, então até programas que ignoram a configuração de proxy passam pela
 
 TCP sobre IPv4 e IPv6 é interceptado. Opções do mesmo cartão:
 
-- **DNS:** escolha entre três modos.
+- **DNS:** escolha entre dois modos.
   - **DNS do sistema:** as consultas não são desviadas.
   - **DNS do proxy:** um servidor DNS local responde aos programas com endereços falsos
     (`198.18.x.x`). Quando o programa conecta num deles, o Veredo sabe o nome do site, aplica as
     regras por domínio e manda o nome para o proxy resolver.
-  - **DNS personalizado:** as consultas vão aos servidores que você informar (`1.1.1.1; 8.8.8.8`),
-    pelo caminho que as regras mandam para o IP de cada um: com regra pelo proxy, por TCP através
-    do proxy (o provedor não vê); com regra direto, por UDP. A consulta chega sem programa dono,
-    então vale como um programa desconhecido; para garantir o caminho, use uma regra com o IP,
-    como `1.1.1.1:53 +proxy:Nome`. Proxies HTTP costumam recusar a porta 53. O Veredo lembra o
-    nome de cada IP resolvido, então as regras por domínio continuam valendo.
-
-  Nos dois últimos, os nomes de "Resolver pela rede local" (`*.lan`, `*.local`...) vão ao DNS da
+  No DNS do proxy, os nomes de "Resolver pela rede local" (`*.lan`, `*.local`...) vão ao DNS da
   sua rede.
 - **Prevenção de vazamento:** liga o DNS pelo proxy, responde vazio às consultas DNS que não são
   de endereço e bloqueia o UDP que sairia direto (o WebRTC revelaria o seu IP).
@@ -321,13 +268,9 @@ No macOS o Veredo funciona no modo explícito. Ative em **Configurações** a op
 proxy do sistema (veja [Modo explícito](#modo-explícito-padrão)), ou aponte cada programa para o
 SOCKS5 `127.0.0.1:58080` ou o HTTP `127.0.0.1:58081`. Programas que ignoram o proxy do sistema
 (muitos de terminal, jogos, alguns apps) não passam pelo Veredo. O modo transparente, o serviço do
-sistema, o início automático e a instalação automática do certificado existem só no Windows e no
-Linux. Sem root, o macOS não informa qual
+sistema e o início automático existem só no Windows e no Linux. Sem root, o macOS não informa qual
 programa abriu cada conexão, então as regras por aplicativo (`apps:`) não casam; as regras por
 site funcionam.
-
-O Mac Intel usa o `cryptography` 48: as versões 49 em diante não publicam pacote pronto para
-ele, e o `uv` tentaria compilar do fonte (o que exige Rust e OpenSSL).
 
 ## Onde ficam os dados
 
@@ -343,15 +286,14 @@ Tudo fica na pasta do seu usuário. **Arquivo > Abrir pasta de dados** abre o lo
 - `conexoes.db`: histórico das conexões, apagado automaticamente depois do número de dias
   definido nas Configurações.
 - `ip_saida.json`: último IP de saída de cada perfil.
-- `interceptacao/`: certificado e chave da CA local da interceptação.
 
 As senhas dos proxies são guardadas no cofre do sistema (Gerenciador de Credenciais no Windows,
 Secret Service no Linux). Se não houver cofre disponível, ficam no `config.json`.
 
 ## Limitações
 
-- UDP só passa por proxies SOCKS5, e não por cadeias simples (um proxy dentro do outro). No
-  modo explícito, UDP só passa se o programa usar o UDP ASSOCIATE do SOCKS5.
+- UDP só passa por proxies SOCKS5. No modo explícito, UDP só passa se o programa usar o UDP
+  ASSOCIATE do SOCKS5.
 - Regras por domínio em conexões SOCKS5 só funcionam se o programa enviar o nome do site ao
   proxy (DNS remoto). Se ele mandar só o IP, valem apenas as regras por IP e CIDR. No modo
   transparente, o DNS pelo proxy resolve isso.

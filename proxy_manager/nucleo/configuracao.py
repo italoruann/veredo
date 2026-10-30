@@ -67,16 +67,13 @@ def _filtrar_campos(classe, dados: dict[str, Any]) -> dict[str, Any]:
 class PerfilProxy:
     id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
     nome: str = "Meu Proxy"
-    type: str = "socks5"  # "socks5", "socks4", "http" ou "https"
+    type: str = "socks5"  # "socks5", "socks4" ou "http"
     host: str = ""
     port: int = 1080
     usuario: str = ""
     senha: str = ""
     ativo: bool = True
     padrao: bool = False
-    # Só para o tipo "https". Desligado aceita qualquer certificado do proxy, como os de
-    # revendedores que apresentam o certificado do fornecedor (outro nome de host).
-    verificar_certificado: bool = True
 
     def para_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -86,21 +83,13 @@ class PerfilProxy:
         return PerfilProxy(**_filtrar_campos(PerfilProxy, dados))
 
 
-TIPOS_CADEIA = ("simples", "redundancia", "balanceamento")
-
-
 @dataclass
 class CadeiaProxy:
-    """Vários perfis usados juntos.
-
-    simples: um túnel dentro do outro, na ordem (o último proxy é o que acessa o destino).
-    redundancia: tenta um perfil por vez, na ordem, até um conectar.
-    balanceamento: reveza o perfil inicial entre as conexões e tenta os outros se ele falhar."""
+    """Perfis de reserva: cada conexão tenta um perfil por vez, na ordem, até um conectar."""
     id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
     nome: str = "Cadeia"
-    tipo: str = "simples"
     proxies: list[str] = field(default_factory=list)  # ids dos perfis, em ordem
-    timeout: int = 10  # segundos para desistir de um perfil (redundância e balanceamento)
+    timeout: int = 10  # segundos para desistir de um perfil
     ativo: bool = True
 
     def para_dict(self) -> dict[str, Any]:
@@ -130,7 +119,7 @@ class Aplicativo:
         return Aplicativo(**_filtrar_campos(Aplicativo, dados))
 
 
-MODOS_DNS = ("sistema", "proxy", "personalizado")
+MODOS_DNS = ("sistema", "proxy")
 
 
 @dataclass
@@ -149,12 +138,9 @@ class Preferencias:
     # DNS no modo transparente (as consultas dos programas são desviadas para o Veredo):
     #   "sistema": não desvia; vale o DNS do sistema.
     #   "proxy": nomes viram IPs falsos e o proxy resolve do lado dele.
-    #   "personalizado": as consultas vão aos `dns_servidores`, pelo caminho que as regras mandarem
-    #   para o IP de cada servidor (pelo proxy, por TCP, ou direto, por UDP).
     modo_dns: str = "sistema"
     dns_excecoes: str = "localhost; *.local; *.lan; *.home.arpa; *.localdomain"
-    # No DNS pelo proxy: os servidores reais do próprio Veredo e das exceções (vazio = os do
-    # sistema). No personalizado: os servidores escolhidos (obrigatório).
+    # Os servidores reais do próprio Veredo e das exceções (vazio = os do sistema).
     dns_servidores: str = ""
     porta_dns: int = 58053
     # Prevenção de vazamento: DNS pelo proxy, consultas DNS que não são de endereço respondidas
@@ -163,12 +149,6 @@ class Preferencias:
     # UDP pelas regras (só no modo transparente): cada fluxo UDP vai direto, é bloqueado ou passa
     # por um proxy SOCKS5, como o TCP. Desligado, só o QUIC é bloqueado.
     udp_pelas_regras: bool = False
-    # Interceptação: as conexões liberadas pelas regras têm o HTTP/HTTPS decifrado e registrado.
-    interceptacao_ativa: bool = False
-    interceptacao_hosts: str = ""  # vazio = todos os hosts
-    interceptacao_excecoes: str = ""
-    interceptacao_limite_corpo_kb: int = 1024  # por corpo; o resto é repassado sem ser guardado
-    interceptacao_verificar_destino: bool = True  # recusar certificados inválidos dos servidores
 
     @property
     def modo_dns_efetivo(self) -> str:

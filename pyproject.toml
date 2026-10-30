@@ -20,10 +20,6 @@ dependencies = [
     "psutil>=7.1",
     "platformdirs>=4.0",
     "keyring>=25.0",
-    # Interceptação HTTPS: autoridade certificadora local e certificados por site. A partir da 49
-    # não há mais wheel para Mac Intel: lá o uv compilaria do fonte (exige Rust e OpenSSL).
-    "cryptography>=46.0; sys_platform != 'darwin' or platform_machine != 'x86_64'",
-    "cryptography>=46.0,<49; sys_platform == 'darwin' and platform_machine == 'x86_64'",
     # Modo transparente no Windows (WinDivert). No Linux é usado o nftables do sistema.
     "pydivert>=2.1; sys_platform == 'win32'",
 ]

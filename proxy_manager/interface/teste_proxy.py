@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import asyncio
-import ssl
 
 from PySide6.QtCore import QThread, Signal
 
@@ -40,11 +39,8 @@ class TesteProxy(QThread):
             escritor.close()
         except (socks5.ErroSocks5, proxy_http.ErroProxyHttp, ErroSocks4, ErroRota) as exc:
             return False, f"O proxy recusou a conexão: {exc}"
-        except ssl.SSLCertVerificationError as exc:
-            return False, (f"O certificado do proxy não foi aceito: {exc.verify_message}. Se o proxy "
-                           "for de um revendedor, desmarque \"Verificar o certificado do proxy\".")
         except (OSError, asyncio.TimeoutError) as exc:
             return False, f"Não foi possível conectar ao proxy: {exc or 'tempo esgotado'}"
-        if rota.eh_cadeia and usado is not None:
+        if rota.eh_cadeia:
             return True, f"Conexão OK (atendida por {usado.nome})."
         return True, "Conexão e autenticação OK."

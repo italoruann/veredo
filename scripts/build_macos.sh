@@ -67,12 +67,6 @@ if [ "${versao_macos%%.*}" -lt 13 ]; then
     exit 1
 fi
 
-# Um OPENSSL_DIR vazio (de um "export OPENSSL_DIR=$(brew --prefix ...)" que falhou) faz
-# qualquer compilacao do cryptography falhar com "include directory does not exist".
-if [ -n "${OPENSSL_DIR+x}" ] && [ -z "$OPENSSL_DIR" ]; then
-    unset OPENSSL_DIR
-fi
-
 # --- Ambiente Python ------------------------------------------------------------
 
 setup_python() {
@@ -83,10 +77,8 @@ setup_python() {
     done
 
     if [ -n "$UV" ]; then
-        # Dependencias do app + grupo "build" (PyInstaller), travadas no uv.lock. O cryptography
-        # nunca e compilado: o uv.lock escolhe uma versao com wheel para este Mac, e compilar do
-        # fonte exigiria Rust e OpenSSL; se faltar a wheel, e melhor falhar na hora.
-        "$UV" sync --locked --group build --no-build-package cryptography
+        # Dependencias do app + grupo "build" (PyInstaller), travadas no uv.lock.
+        "$UV" sync --locked --group build
         run_python() { "$UV" run --no-sync python "$@"; }
     else
         if [ ! -x .venv/bin/python ]; then
@@ -96,9 +88,7 @@ setup_python() {
             "$PY" -m venv .venv
         fi
         .venv/bin/python -m pip --version >/dev/null 2>&1 || .venv/bin/python -m ensurepip --upgrade
-        # O cryptography 49+ nao tem wheel para Mac Intel; o pyproject ja limita, e --only-binary
-        # garante que o pip nao tente compilar.
-        .venv/bin/python -m pip install --quiet --only-binary cryptography -e . "pyinstaller>=6.16"
+        .venv/bin/python -m pip install --quiet -e . "pyinstaller>=6.16"
         run_python() { .venv/bin/python "$@"; }
     fi
 }

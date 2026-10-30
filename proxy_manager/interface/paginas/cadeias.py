@@ -1,4 +1,4 @@
-"""Página de Cadeias: grupos de perfis usados juntos (em sequência, redundância ou balanceamento)."""
+"""Página de Cadeias: perfis de reserva, usados na ordem quando o anterior não responde."""
 from __future__ import annotations
 
 import re
@@ -13,19 +13,6 @@ from ..contexto import Contexto
 from ...nucleo.cliente_proxy import Rota
 from ...nucleo.configuracao import CadeiaProxy
 from ..teste_proxy import TesteProxy
-
-ROTULOS_TIPO = {
-    "simples": "Simples (em sequência)",
-    "redundancia": "Redundância",
-    "balanceamento": "Balanceamento",
-}
-DICAS_TIPO = {
-    "simples": "A conexão passa por todos os proxies, na ordem da lista. O último é o que acessa o site.",
-    "redundancia": "Usa o primeiro proxy da lista; se ele não responder dentro do tempo limite, tenta o seguinte.",
-    "balanceamento": "Cada nova conexão começa por um proxy diferente da lista, em rodízio. Se ele falhar, "
-                     "tenta os outros.",
-}
-
 
 def renomear_cadeia_nas_regras(texto: str, antigo: str, novo: str) -> str:
     return re.sub(rf"\+chain:{re.escape(antigo)}(?=\s|$)", f"+chain:{novo}", texto, flags=re.MULTILINE)
@@ -45,8 +32,9 @@ class PaginaCadeias(QWidget):
 
         titulo = QLabel("Cadeias de proxy")
         titulo.setObjectName("TituloSecao")
-        subtitulo = QLabel("Junte perfis de proxy para usar em sequência, como reserva um do outro ou "
-                           "dividindo as conexões. Nas regras, use +chain:Nome.")
+        subtitulo = QLabel("Junte perfis de proxy como reserva um do outro: cada conexão usa o primeiro "
+                           "da lista e, se ele não responder dentro do tempo limite, tenta o seguinte. "
+                           "Nas regras, use +chain:Nome.")
         subtitulo.setObjectName("SubtituloPagina")
         subtitulo.setWordWrap(True)
         raiz.addWidget(titulo)
@@ -78,25 +66,15 @@ class PaginaCadeias(QWidget):
         form.setSpacing(10)
         self.campo_nome = QLineEdit()
         self.campo_nome.setPlaceholderText("sem espaços (vai nas regras)")
-        self.combo_tipo = QComboBox()
-        for chave, rotulo in ROTULOS_TIPO.items():
-            self.combo_tipo.addItem(rotulo, chave)
-        self.combo_tipo.currentIndexChanged.connect(self._atualizar_dica_tipo)
         self.campo_timeout = QSpinBox()
         self.campo_timeout.setRange(1, 120)
         self.campo_timeout.setSuffix(" s")
         self.campo_timeout.setToolTip("Tempo para desistir de um proxy e tentar o próximo")
         self.caixa_ativa = QCheckBox("Habilitada")
         form.addRow("Nome", self.campo_nome)
-        form.addRow("Tipo", self.combo_tipo)
         form.addRow("Tempo limite por proxy", self.campo_timeout)
         form.addRow("", self.caixa_ativa)
         layout_form.addLayout(form)
-
-        self.rotulo_dica_tipo = QLabel("")
-        self.rotulo_dica_tipo.setObjectName("DicaCartao")
-        self.rotulo_dica_tipo.setWordWrap(True)
-        layout_form.addWidget(self.rotulo_dica_tipo)
 
         layout_form.addWidget(QLabel("Proxies da cadeia, em ordem:"))
         self.lista_membros = QListWidget()
@@ -147,7 +125,7 @@ class PaginaCadeias(QWidget):
         layout_form.addLayout(linha_botoes)
         layout_form.addStretch(1)
 
-        self._controles = [self.campo_nome, self.combo_tipo, self.campo_timeout, self.caixa_ativa,
+        self._controles = [self.campo_nome, self.campo_timeout, self.caixa_ativa,
                            self.lista_membros, self.combo_perfis, botao_incluir, botao_subir,
                            botao_descer, botao_tirar, self.botao_salvar, self.botao_testar, self.botao_remover]
 
@@ -212,11 +190,6 @@ class PaginaCadeias(QWidget):
                     texto += "  (desabilitado, será ignorado)"
             self.lista_membros.addItem(texto)
 
-    def _atualizar_dica_tipo(self) -> None:
-        tipo = self.combo_tipo.currentData()
-        self.rotulo_dica_tipo.setText(DICAS_TIPO.get(tipo, ""))
-        self.campo_timeout.setEnabled(self._atual is not None and tipo != "simples")
-
     # -- eventos -----------------------------------------------------------
 
     def _ao_selecionar(self, atual: QListWidgetItem | None, _anterior) -> None:
@@ -230,12 +203,10 @@ class PaginaCadeias(QWidget):
             return
         self._habilitar_form(True)
         self.campo_nome.setText(cadeia.nome)
-        self.combo_tipo.setCurrentIndex(max(self.combo_tipo.findData(cadeia.tipo), 0))
         self.campo_timeout.setValue(cadeia.timeout)
         self.caixa_ativa.setChecked(cadeia.ativo)
         self._membros = list(cadeia.proxies)
         self._mostrar_membros()
-        self._atualizar_dica_tipo()
         self.rotulo_resultado.setText("")
 
     def _ao_criar(self) -> None:
@@ -285,7 +256,6 @@ class PaginaCadeias(QWidget):
             cfg = self.ctx.configuracao
             cfg.texto_regras = renomear_cadeia_nas_regras(cfg.texto_regras, cadeia.nome, nome)
         cadeia.nome = nome
-        cadeia.tipo = self.combo_tipo.currentData()
         cadeia.timeout = self.campo_timeout.value()
         cadeia.ativo = self.caixa_ativa.isChecked()
         cadeia.proxies = [i for i in self._membros if i in self._perfis_por_id()]
@@ -312,8 +282,7 @@ class PaginaCadeias(QWidget):
         perfis = self._perfis_por_id()
         membros = [perfis[i] for i in self._membros if i in perfis and perfis[i].ativo]
         rota = Rota(id=self._atual.id, nome=self.campo_nome.text(), perfis=membros,
-                    tipo=self.combo_tipo.currentData(), timeout=float(self.campo_timeout.value()),
-                    eh_cadeia=True)
+                    timeout=float(self.campo_timeout.value()), eh_cadeia=True)
         self.rotulo_resultado.setText("Testando a cadeia…")
         self.botao_testar.setEnabled(False)
         self._teste = TesteProxy(rota)

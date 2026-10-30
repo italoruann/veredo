@@ -66,15 +66,13 @@ async def resolver(host: str) -> list[str]:
     return [info[4][0] for info in infos]
 
 
-async def abrir_conexao(host: str, porta: int, timeout: float | None = 15.0,
-                        **kwargs) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
-    """Como `asyncio.open_connection`, com a porta local anunciada durante o connect().
-
-    `kwargs` vai para `open_connection` (ssl, server_hostname...)."""
-    return await asyncio.wait_for(_abrir(host, porta, **kwargs), timeout=timeout)
+async def abrir_conexao(host: str, porta: int, timeout: float | None = 15.0
+                        ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+    """Como `asyncio.open_connection`, com a porta local anunciada durante o connect()."""
+    return await asyncio.wait_for(_abrir(host, porta), timeout=timeout)
 
 
-async def _abrir(host: str, porta: int, **kwargs) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+async def _abrir(host: str, porta: int) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
     loop = asyncio.get_running_loop()
     enderecos = await resolver(host)
     ultimo_erro: OSError | None = None
@@ -100,5 +98,5 @@ async def _abrir(host: str, porta: int, **kwargs) -> tuple[asyncio.StreamReader,
         finally:
             if porta_local:
                 liberar_porta(porta_local)
-        return await asyncio.open_connection(sock=sock, **kwargs)
+        return await asyncio.open_connection(sock=sock)
     raise ultimo_erro or OSError(f"não foi possível resolver {host}")

@@ -20,7 +20,7 @@ _HOST_VERIFICACAO_IPV6 = "api6.ipify.org"
 async def consultar_ip_saida(perfil: PerfilProxy, timeout: float = 8.0) -> str | None:
     """Devolve o IP de saída ou None se a consulta falhar. Nunca levanta exceção."""
     try:
-        leitor, escritor = await cliente_proxy.abrir_tunel([perfil], _HOST_VERIFICACAO, _PORTA_VERIFICACAO,
+        leitor, escritor = await cliente_proxy.abrir_tunel(perfil, _HOST_VERIFICACAO, _PORTA_VERIFICACAO,
                                                            timeout=timeout)
     except Exception:
         return None

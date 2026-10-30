@@ -10,12 +10,10 @@ from PySide6.QtCore import QObject, QTimer, Signal
 from ..nucleo import integracao_sistema, servico
 from ..nucleo.configuracao import Configuracao, carregar_configuracao, salvar_configuracao
 from ..nucleo.estado_ip_saida import carregar_ips_saida, salvar_ips_saida
-from ..nucleo.interceptacao.fluxos import ArmazemFluxos, Fluxo
 from ..nucleo.motor import MotorProxy
 from ..nucleo.registro import EntradaLog, Registro
 from .aviso_voz import AvisoVoz
 from .modelo_conexoes import ModeloConexoes
-from .modelo_fluxos import ModeloFluxos
 
 # Os eventos de log são acumulados e entregues em lote; um sinal por conexão travava a interface.
 INTERVALO_DESCARGA_MS = 200
@@ -29,15 +27,12 @@ class Contexto(QObject):
     estado_mudou = Signal(bool, str)
     configuracao_mudou = Signal()
     ip_saida_mudou = Signal(str, str, str)  # id do perfil, IP anterior, IP atual
-    fluxos_mudaram = Signal(list)  # fluxos interceptados novos ou atualizados
 
     def __init__(self) -> None:
         super().__init__()
         self.configuracao: Configuracao = carregar_configuracao()
         self.registro = Registro(dias_retencao=self.configuracao.preferencias.dias_retencao_log)
         self.registro.inscrever(self._ao_registrar)
-        self.fluxos = ArmazemFluxos()
-        self.fluxos.inscrever(self._ao_interceptar)
         # id do perfil -> (IP anterior, IP atual), preservado entre execuções.
         self.ips_saida: dict[str, tuple[str, str]] = carregar_ips_saida()
         # Com o serviço do sistema rodando, a janela só o controla; senão o motor roda aqui. Aberta
@@ -45,25 +40,22 @@ class Contexto(QObject):
         # disputaria as portas com ele e o modo transparente falharia.
         if servico.servico_disponivel() or (servico.servico_instalado()
                                             and servico.esperar_servico(timeout=ESPERA_SERVICO)):
-            self._usar_motor(servico.MotorRemoto(self.registro, fluxos=self.fluxos))
+            self._usar_motor(servico.MotorRemoto(self.registro))
             self.motor.atualizar_configuracao(self.configuracao)
             # O serviço só mantém o motor ligado com a janela aberta; abri-la o liga, como antes
             # fazia o boot. Depois do laço de eventos, para a janela já receber o estado.
             QTimer.singleShot(0, self.motor.iniciar)
         else:
-            self._usar_motor(MotorProxy(self.configuracao, self.registro, self.fluxos))
+            self._usar_motor(MotorProxy(self.configuracao, self.registro))
         self.aviso_voz = AvisoVoz(self)
 
         self._trava_pendentes = threading.Lock()
         self._pendentes_novos: list[EntradaLog] = []
         self._pendentes_atualizados: dict[str, EntradaLog] = {}
-        self._fluxos_pendentes: dict[str, Fluxo] = {}
 
         self.modelo_conexoes = ModeloConexoes()
         self.log_adicionado.connect(self.modelo_conexoes.adicionar_entradas)
         self.log_atualizado.connect(self.modelo_conexoes.atualizar_entradas)
-        self.modelo_fluxos = ModeloFluxos()
-        self.fluxos_mudaram.connect(self.modelo_fluxos.receber)
 
         self._temporizador_descarga = QTimer(self)
         self._temporizador_descarga.setInterval(INTERVALO_DESCARGA_MS)
@@ -90,7 +82,7 @@ class Contexto(QObject):
         if self.usando_servico:
             return
         self.motor.parar()
-        self._usar_motor(servico.MotorRemoto(self.registro, fluxos=self.fluxos))
+        self._usar_motor(servico.MotorRemoto(self.registro))
         self.motor.atualizar_configuracao(self.configuracao)
         self.motor.iniciar()
 
@@ -99,7 +91,7 @@ class Contexto(QObject):
         if not self.usando_servico:
             return
         self.motor.desconectar()
-        self._usar_motor(MotorProxy(self.configuracao, self.registro, self.fluxos))
+        self._usar_motor(MotorProxy(self.configuracao, self.registro))
         self.estado_mudou.emit(False, "Motor parado")
 
     def encerrar(self) -> None:
@@ -118,22 +110,13 @@ class Contexto(QObject):
             else:
                 self._pendentes_atualizados[entrada.id] = entrada
 
-    def _ao_interceptar(self, _evento: str, fluxo: Fluxo) -> None:
-        # Thread do motor: só enfileira. Vários eventos do mesmo fluxo viram um.
-        with self._trava_pendentes:
-            self._fluxos_pendentes[fluxo.id] = fluxo
-
     def _descarregar_pendentes(self) -> None:
         with self._trava_pendentes:
-            if not self._pendentes_novos and not self._pendentes_atualizados and not self._fluxos_pendentes:
+            if not self._pendentes_novos and not self._pendentes_atualizados:
                 return
             novos, self._pendentes_novos = self._pendentes_novos, []
             atualizados = list(self._pendentes_atualizados.values())
             self._pendentes_atualizados = {}
-            fluxos = list(self._fluxos_pendentes.values())
-            self._fluxos_pendentes = {}
-        if fluxos:
-            self.fluxos_mudaram.emit(fluxos)
         if novos:
             self.log_adicionado.emit(novos)
         if atualizados:
@@ -183,7 +166,7 @@ class Contexto(QObject):
             salvar_ips_saida(self.ips_saida)
 
     def aplicar_ao_vivo(self) -> tuple[bool, str]:
-        """Como `aplicar_mudancas`, mas reabre as portas alteradas com o motor ligado."""
+        """Como `aplicar_mudancas`, mas religa o modo transparente alterado com o motor ligado."""
         ok, mensagem = self.motor.aplicar_ao_vivo(self.configuracao)
         self.registro.dias_retencao = self.configuracao.preferencias.dias_retencao_log
         self.salvar()
